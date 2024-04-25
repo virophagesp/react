@@ -18,17 +18,33 @@ import {checkKeyStringCoercion} from 'shared/CheckStringCoercion';
 import isValidElementType from 'shared/isValidElementType';
 import isArray from 'shared/isArray';
 import {describeUnknownElementTypeFrameInDEV} from 'shared/ReactComponentStackFrame';
-import {enableRefAsProp, disableStringRefs} from 'shared/ReactFeatureFlags';
-
-const ReactCurrentOwner = ReactSharedInternals.ReactCurrentOwner;
-const ReactDebugCurrentFrame = ReactSharedInternals.ReactDebugCurrentFrame;
+import {
+  enableRefAsProp,
+  disableStringRefs,
+  disableDefaultPropsExceptForClasses,
+} from 'shared/ReactFeatureFlags';
+import {checkPropStringCoercion} from 'shared/CheckStringCoercion';
+import {ClassComponent} from 'react-reconciler/src/ReactWorkTags';
+import getComponentNameFromFiber from 'react-reconciler/src/getComponentNameFromFiber';
 
 const REACT_CLIENT_REFERENCE = Symbol.for('react.client.reference');
+
+function getOwner() {
+  if (__DEV__ || !disableStringRefs) {
+    const dispatcher = ReactSharedInternals.A;
+    if (dispatcher === null) {
+      return null;
+    }
+    return dispatcher.getOwner();
+  }
+  return null;
+}
 
 let specialPropKeyWarningShown;
 let specialPropRefWarningShown;
 let didWarnAboutStringRefs;
 let didWarnAboutElementRef;
+let didWarnAboutOldJSXRuntime;
 
 if (__DEV__) {
   didWarnAboutStringRefs = {};
@@ -61,16 +77,15 @@ function hasValidKey(config) {
 
 function warnIfStringRefCannotBeAutoConverted(config, self) {
   if (__DEV__) {
+    let owner;
     if (
       !disableStringRefs &&
       typeof config.ref === 'string' &&
-      ReactCurrentOwner.current &&
+      (owner = getOwner()) &&
       self &&
-      ReactCurrentOwner.current.stateNode !== self
+      owner.stateNode !== self
     ) {
-      const componentName = getComponentNameFromType(
-        ReactCurrentOwner.current.type,
-      );
+      const componentName = getComponentNameFromType(owner.type);
 
       if (!didWarnAboutStringRefs[componentName]) {
         console.error(
@@ -80,7 +95,7 @@ function warnIfStringRefCannotBeAutoConverted(config, self) {
             'We ask you to manually fix this case by using useRef() or createRef() instead. ' +
             'Learn more about using refs safely here: ' +
             'https://react.dev/link/strict-mode-string-ref',
-          getComponentNameFromType(ReactCurrentOwner.current.type),
+          getComponentNameFromType(owner.type),
           config.ref,
         );
         didWarnAboutStringRefs[componentName] = true;
@@ -157,7 +172,7 @@ function elementRefGetterWithDeprecationWarning() {
 /**
  * Factory method to create a new React element. This no longer adheres to
  * the class pattern, so do not use new to call it. Also, instanceof check
- * will not work. Instead test $$typeof field against Symbol.for('react.element') to check
+ * will not work. Instead test $$typeof field against Symbol.for('react.transitional.element') to check
  * if something is a React Element.
  *
  * @param {*} type
@@ -235,6 +250,19 @@ function ReactElement(type, key, _ref, self, source, owner, props) {
         value: null,
       });
     }
+  } else if (!__DEV__ && disableStringRefs) {
+    // In prod, `ref` is a regular property and _owner doesn't exist.
+    element = {
+      // This tag allows us to uniquely identify this as a React Element
+      $$typeof: REACT_ELEMENT_TYPE,
+
+      // Built-in properties that belong on the element
+      type,
+      key,
+      ref,
+
+      props,
+    };
   } else {
     // In prod, `ref` is a regular property. It will be removed in a
     // future release.
@@ -294,11 +322,6 @@ function ReactElement(type, key, _ref, self, source, owner, props) {
  * @param {string} key
  */
 export function jsxProd(type, config, maybeKey) {
-  let propName;
-
-  // Reserved names are extracted
-  const props = {};
-
   let key = null;
   let ref = null;
 
@@ -325,40 +348,54 @@ export function jsxProd(type, config, maybeKey) {
   if (hasValidRef(config)) {
     if (!enableRefAsProp) {
       ref = config.ref;
-    }
-  }
-
-  // Remaining properties are added to a new props object
-  for (propName in config) {
-    if (
-      hasOwnProperty.call(config, propName) &&
-      // Skip over reserved prop names
-      propName !== 'key' &&
-      (enableRefAsProp || propName !== 'ref')
-    ) {
-      props[propName] = config[propName];
-    }
-  }
-
-  // Resolve default props
-  if (type && type.defaultProps) {
-    const defaultProps = type.defaultProps;
-    for (propName in defaultProps) {
-      if (props[propName] === undefined) {
-        props[propName] = defaultProps[propName];
+      if (!disableStringRefs) {
+        ref = coerceStringRef(ref, getOwner(), type);
       }
     }
   }
 
-  return ReactElement(
-    type,
-    key,
-    ref,
-    undefined,
-    undefined,
-    ReactCurrentOwner.current,
-    props,
-  );
+  let props;
+  if (enableRefAsProp && disableStringRefs && !('key' in config)) {
+    // If key was not spread in, we can reuse the original props object. This
+    // only works for `jsx`, not `createElement`, because `jsx` is a compiler
+    // target and the compiler always passes a new object. For `createElement`,
+    // we can't assume a new object is passed every time because it can be
+    // called manually.
+    //
+    // Spreading key is a warning in dev. In a future release, we will not
+    // remove a spread key from the props object. (But we'll still warn.) We'll
+    // always pass the object straight through.
+    props = config;
+  } else {
+    // We need to remove reserved props (key, prop, ref). Create a fresh props
+    // object and copy over all the non-reserved props. We don't use `delete`
+    // because in V8 it will deopt the object to dictionary mode.
+    props = {};
+    for (const propName in config) {
+      // Skip over reserved prop names
+      if (propName !== 'key' && (enableRefAsProp || propName !== 'ref')) {
+        if (enableRefAsProp && !disableStringRefs && propName === 'ref') {
+          props.ref = coerceStringRef(config[propName], getOwner(), type);
+        } else {
+          props[propName] = config[propName];
+        }
+      }
+    }
+  }
+
+  if (!disableDefaultPropsExceptForClasses) {
+    // Resolve default props
+    if (type && type.defaultProps) {
+      const defaultProps = type.defaultProps;
+      for (const propName in defaultProps) {
+        if (props[propName] === undefined) {
+          props[propName] = defaultProps[propName];
+        }
+      }
+    }
+  }
+
+  return ReactElement(type, key, ref, undefined, undefined, getOwner(), props);
 }
 
 // While `jsxDEV` should never be called when running in production, we do
@@ -505,11 +542,6 @@ export function jsxDEV(type, config, maybeKey, isStaticChildren, source, self) {
       }
     }
 
-    let propName;
-
-    // Reserved names are extracted
-    const props = {};
-
     let key = null;
     let ref = null;
 
@@ -536,30 +568,52 @@ export function jsxDEV(type, config, maybeKey, isStaticChildren, source, self) {
     if (hasValidRef(config)) {
       if (!enableRefAsProp) {
         ref = config.ref;
+        if (!disableStringRefs) {
+          ref = coerceStringRef(ref, getOwner(), type);
+        }
       }
       if (!disableStringRefs) {
         warnIfStringRefCannotBeAutoConverted(config, self);
       }
     }
 
-    // Remaining properties are added to a new props object
-    for (propName in config) {
-      if (
-        hasOwnProperty.call(config, propName) &&
+    let props;
+    if (enableRefAsProp && disableStringRefs && !('key' in config)) {
+      // If key was not spread in, we can reuse the original props object. This
+      // only works for `jsx`, not `createElement`, because `jsx` is a compiler
+      // target and the compiler always passes a new object. For `createElement`,
+      // we can't assume a new object is passed every time because it can be
+      // called manually.
+      //
+      // Spreading key is a warning in dev. In a future release, we will not
+      // remove a spread key from the props object. (But we'll still warn.) We'll
+      // always pass the object straight through.
+      props = config;
+    } else {
+      // We need to remove reserved props (key, prop, ref). Create a fresh props
+      // object and copy over all the non-reserved props. We don't use `delete`
+      // because in V8 it will deopt the object to dictionary mode.
+      props = {};
+      for (const propName in config) {
         // Skip over reserved prop names
-        propName !== 'key' &&
-        (enableRefAsProp || propName !== 'ref')
-      ) {
-        props[propName] = config[propName];
+        if (propName !== 'key' && (enableRefAsProp || propName !== 'ref')) {
+          if (enableRefAsProp && !disableStringRefs && propName === 'ref') {
+            props.ref = coerceStringRef(config[propName], getOwner(), type);
+          } else {
+            props[propName] = config[propName];
+          }
+        }
       }
     }
 
-    // Resolve default props
-    if (type && type.defaultProps) {
-      const defaultProps = type.defaultProps;
-      for (propName in defaultProps) {
-        if (props[propName] === undefined) {
-          props[propName] = defaultProps[propName];
+    if (!disableDefaultPropsExceptForClasses) {
+      // Resolve default props
+      if (type && type.defaultProps) {
+        const defaultProps = type.defaultProps;
+        for (const propName in defaultProps) {
+          if (props[propName] === undefined) {
+            props[propName] = defaultProps[propName];
+          }
         }
       }
     }
@@ -583,7 +637,7 @@ export function jsxDEV(type, config, maybeKey, isStaticChildren, source, self) {
       ref,
       self,
       source,
-      ReactCurrentOwner.current,
+      getOwner(),
       props,
     );
 
@@ -663,9 +717,32 @@ export function createElement(type, config, children) {
   let ref = null;
 
   if (config != null) {
+    if (__DEV__) {
+      if (
+        !didWarnAboutOldJSXRuntime &&
+        '__self' in config &&
+        // Do not assume this is the result of an oudated JSX transform if key
+        // is present, because the modern JSX transform sometimes outputs
+        // createElement to preserve precedence between a static key and a
+        // spread key. To avoid false positive warnings, we never warn if
+        // there's a key.
+        !('key' in config)
+      ) {
+        didWarnAboutOldJSXRuntime = true;
+        console.warn(
+          'Your app (or one of its dependencies) is using an outdated JSX ' +
+            'transform. Update to the modern JSX transform for ' +
+            'faster performance: https://react.dev/link/new-jsx-transform',
+        );
+      }
+    }
+
     if (hasValidRef(config)) {
       if (!enableRefAsProp) {
         ref = config.ref;
+        if (!disableStringRefs) {
+          ref = coerceStringRef(ref, getOwner(), type);
+        }
       }
 
       if (__DEV__ && !disableStringRefs) {
@@ -693,7 +770,11 @@ export function createElement(type, config, children) {
         propName !== '__self' &&
         propName !== '__source'
       ) {
-        props[propName] = config[propName];
+        if (enableRefAsProp && !disableStringRefs && propName === 'ref') {
+          props.ref = coerceStringRef(config[propName], getOwner(), type);
+        } else {
+          props[propName] = config[propName];
+        }
       }
     }
   }
@@ -746,7 +827,7 @@ export function createElement(type, config, children) {
     ref,
     undefined,
     undefined,
-    ReactCurrentOwner.current,
+    getOwner(),
     props,
   );
 
@@ -766,7 +847,7 @@ export function cloneAndReplaceKey(oldElement, newKey) {
     enableRefAsProp ? null : oldElement.ref,
     undefined,
     undefined,
-    oldElement._owner,
+    !__DEV__ && disableStringRefs ? undefined : oldElement._owner,
     oldElement.props,
   );
 }
@@ -792,15 +873,18 @@ export function cloneElement(element, config, children) {
   let ref = enableRefAsProp ? null : element.ref;
 
   // Owner will be preserved, unless ref is overridden
-  let owner = element._owner;
+  let owner = !__DEV__ && disableStringRefs ? undefined : element._owner;
 
   if (config != null) {
     if (hasValidRef(config)) {
+      owner = __DEV__ || !disableStringRefs ? getOwner() : undefined;
       if (!enableRefAsProp) {
         // Silently steal the ref from the parent.
         ref = config.ref;
+        if (!disableStringRefs) {
+          ref = coerceStringRef(ref, owner, element.type);
+        }
       }
-      owner = ReactCurrentOwner.current;
     }
     if (hasValidKey(config)) {
       if (__DEV__) {
@@ -811,7 +895,11 @@ export function cloneElement(element, config, children) {
 
     // Remaining properties override existing props
     let defaultProps;
-    if (element.type && element.type.defaultProps) {
+    if (
+      !disableDefaultPropsExceptForClasses &&
+      element.type &&
+      element.type.defaultProps
+    ) {
       defaultProps = element.type.defaultProps;
     }
     for (propName in config) {
@@ -833,11 +921,19 @@ export function cloneElement(element, config, children) {
         // backwards compatibility.
         !(enableRefAsProp && propName === 'ref' && config.ref === undefined)
       ) {
-        if (config[propName] === undefined && defaultProps !== undefined) {
+        if (
+          !disableDefaultPropsExceptForClasses &&
+          config[propName] === undefined &&
+          defaultProps !== undefined
+        ) {
           // Resolve default props
           props[propName] = defaultProps[propName];
         } else {
-          props[propName] = config[propName];
+          if (enableRefAsProp && !disableStringRefs && propName === 'ref') {
+            props.ref = coerceStringRef(config[propName], owner, element.type);
+          } else {
+            props[propName] = config[propName];
+          }
         }
       }
     }
@@ -875,8 +971,9 @@ export function cloneElement(element, config, children) {
 
 function getDeclarationErrorAddendum() {
   if (__DEV__) {
-    if (ReactCurrentOwner.current) {
-      const name = getComponentNameFromType(ReactCurrentOwner.current.type);
+    const owner = getOwner();
+    if (owner) {
+      const name = getComponentNameFromType(owner.type);
       if (name) {
         return '\n\nCheck the render method of `' + name + '`.';
       }
@@ -920,10 +1017,12 @@ function validateChildKeys(node, parentType) {
         // but now we print a separate warning for them later.
         if (iteratorFn !== node.entries) {
           const iterator = iteratorFn.call(node);
-          let step;
-          while (!(step = iterator.next()).done) {
-            if (isValidElement(step.value)) {
-              validateExplicitKey(step.value, parentType);
+          if (iterator !== node) {
+            let step;
+            while (!(step = iterator.next()).done) {
+              if (isValidElement(step.value)) {
+                validateExplicitKey(step.value, parentType);
+              }
             }
           }
         }
@@ -977,15 +1076,15 @@ function validateExplicitKey(element, parentType) {
     // property, it may be the creator of the child that's responsible for
     // assigning it a key.
     let childOwner = '';
-    if (
-      element &&
-      element._owner &&
-      element._owner !== ReactCurrentOwner.current
-    ) {
+    if (element && element._owner != null && element._owner !== getOwner()) {
+      let ownerName = null;
+      if (typeof element._owner.tag === 'number') {
+        ownerName = getComponentNameFromType(element._owner.type);
+      } else if (typeof element._owner.name === 'string') {
+        ownerName = element._owner.name;
+      }
       // Give the component that originally created this child.
-      childOwner = ` It was passed a child from ${getComponentNameFromType(
-        element._owner.type,
-      )}.`;
+      childOwner = ` It was passed a child from ${ownerName}.`;
     }
 
     setCurrentlyValidatingElement(element);
@@ -1007,9 +1106,9 @@ function setCurrentlyValidatingElement(element) {
         element.type,
         owner ? owner.type : null,
       );
-      ReactDebugCurrentFrame.setExtraStackFrame(stack);
+      ReactSharedInternals.setExtraStackFrame(stack);
     } else {
-      ReactDebugCurrentFrame.setExtraStackFrame(null);
+      ReactSharedInternals.setExtraStackFrame(null);
     }
   }
 }
@@ -1056,4 +1155,98 @@ function validateFragmentProps(fragment) {
       setCurrentlyValidatingElement(null);
     }
   }
+}
+
+function coerceStringRef(mixedRef, owner, type) {
+  if (disableStringRefs) {
+    return mixedRef;
+  }
+
+  let stringRef;
+  if (typeof mixedRef === 'string') {
+    stringRef = mixedRef;
+  } else {
+    if (typeof mixedRef === 'number' || typeof mixedRef === 'boolean') {
+      if (__DEV__) {
+        checkPropStringCoercion(mixedRef, 'ref');
+      }
+      stringRef = '' + mixedRef;
+    } else {
+      return mixedRef;
+    }
+  }
+
+  const callback = stringRefAsCallbackRef.bind(null, stringRef, type, owner);
+  // This is used to check whether two callback refs conceptually represent
+  // the same string ref, and can therefore be reused by the reconciler. Needed
+  // for backwards compatibility with old Meta code that relies on string refs
+  // not being reattached on every render.
+  callback.__stringRef = stringRef;
+  callback.__type = type;
+  callback.__owner = owner;
+  return callback;
+}
+
+function stringRefAsCallbackRef(stringRef, type, owner, value) {
+  if (disableStringRefs) {
+    return;
+  }
+  if (!owner) {
+    throw new Error(
+      `Element ref was specified as a string (${stringRef}) but no owner was set. This could happen for one of` +
+        ' the following reasons:\n' +
+        '1. You may be adding a ref to a function component\n' +
+        "2. You may be adding a ref to a component that was not created inside a component's render method\n" +
+        '3. You have multiple copies of React loaded\n' +
+        'See https://react.dev/link/refs-must-have-owner for more information.',
+    );
+  }
+  if (owner.tag !== ClassComponent) {
+    throw new Error(
+      'Function components cannot have string refs. ' +
+        'We recommend using useRef() instead. ' +
+        'Learn more about using refs safely here: ' +
+        'https://react.dev/link/strict-mode-string-ref',
+    );
+  }
+
+  if (__DEV__) {
+    if (
+      // Will already warn with "Function components cannot be given refs"
+      !(typeof type === 'function' && !isReactClass(type))
+    ) {
+      const componentName = getComponentNameFromFiber(owner) || 'Component';
+      if (!didWarnAboutStringRefs[componentName]) {
+        console.error(
+          'Component "%s" contains the string ref "%s". Support for string refs ' +
+            'will be removed in a future major release. We recommend using ' +
+            'useRef() or createRef() instead. ' +
+            'Learn more about using refs safely here: ' +
+            'https://react.dev/link/strict-mode-string-ref',
+          componentName,
+          stringRef,
+        );
+        didWarnAboutStringRefs[componentName] = true;
+      }
+    }
+  }
+
+  const inst = owner.stateNode;
+  if (!inst) {
+    throw new Error(
+      `Missing owner for string ref ${stringRef}. This error is likely caused by a ` +
+        'bug in React. Please file an issue.',
+    );
+  }
+
+  const refs = inst.refs;
+  if (value === null) {
+    delete refs[stringRef];
+  } else {
+    refs[stringRef] = value;
+  }
+}
+
+function isReactClass(type) {
+  return type.prototype && type.prototype.isReactComponent;
 }

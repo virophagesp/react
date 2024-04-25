@@ -40,6 +40,8 @@ import {
   alwaysThrottleRetries,
   enableInfiniteRenderLoopDetection,
   disableLegacyMode,
+  disableDefaultPropsExceptForClasses,
+  disableStringRefs,
 } from 'shared/ReactFeatureFlags';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import is from 'shared/objectIs';
@@ -70,11 +72,13 @@ import {
   cancelTimeout,
   noTimeout,
   afterActiveInstanceBlur,
-  getCurrentEventPriority,
   startSuspendingCommit,
   waitForCommitToBeReady,
   preloadInstance,
   supportsHydration,
+  setCurrentUpdatePriority,
+  getCurrentUpdatePriority,
+  resolveUpdatePriority,
 } from './ReactFiberConfig';
 
 import {createWorkInProgress, resetWorkInProgress} from './ReactFiber';
@@ -90,7 +94,6 @@ import {
 } from './ReactTypeOfMode';
 import {
   HostRoot,
-  IndeterminateComponent,
   ClassComponent,
   SuspenseComponent,
   SuspenseListComponent,
@@ -158,10 +161,9 @@ import {
 import {
   DiscreteEventPriority,
   DefaultEventPriority,
-  getCurrentUpdatePriority,
-  setCurrentUpdatePriority,
   lowerEventPriority,
   lanesToEventPriority,
+  eventPriorityToLane,
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
@@ -201,7 +203,8 @@ import {
   resetHooksOnUnwind,
   ContextOnlyDispatcher,
 } from './ReactFiberHooks';
-import {DefaultCacheDispatcher} from './ReactFiberCache';
+import {DefaultAsyncDispatcher} from './ReactFiberAsyncDispatcher';
+import {setCurrentOwner} from './ReactFiberCurrentOwner';
 import {
   createCapturedValueAtFiber,
   type CapturedValue,
@@ -265,7 +268,7 @@ import {
   getSuspenseHandler,
   getShellBoundary,
 } from './ReactFiberSuspenseContext';
-import {resolveDefaultProps} from './ReactFiberLazyComponent';
+import {resolveDefaultPropsOnNonClassComponent} from './ReactFiberLazyComponent';
 import {resetChildReconcilerOnUnwind} from './ReactChildFiber';
 import {
   ensureRootIsScheduled,
@@ -279,14 +282,6 @@ import {peekEntangledActionLane} from './ReactFiberAsyncAction';
 import {logUncaughtError} from './ReactFiberErrorLogger';
 
 const PossiblyWeakMap = typeof WeakMap === 'function' ? WeakMap : Map;
-
-const {
-  ReactCurrentDispatcher,
-  ReactCurrentCache,
-  ReactCurrentOwner,
-  ReactCurrentBatchConfig,
-  ReactCurrentActQueue,
-} = ReactSharedInternals;
 
 type ExecutionContext = number;
 
@@ -603,7 +598,7 @@ export function getCurrentTime(): number {
 export function requestUpdateLane(fiber: Fiber): Lane {
   // Special cases
   const mode = fiber.mode;
-  if ((mode & ConcurrentMode) === NoMode) {
+  if (!disableLegacyMode && (mode & ConcurrentMode) === NoMode) {
     return (SyncLane: Lane);
   } else if (
     (executionContext & RenderContext) !== NoContext &&
@@ -624,12 +619,10 @@ export function requestUpdateLane(fiber: Fiber): Lane {
   const transition = requestCurrentTransition();
   if (transition !== null) {
     if (__DEV__) {
-      const batchConfigTransition = ReactCurrentBatchConfig.transition;
-      if (!batchConfigTransition._updatedFibers) {
-        batchConfigTransition._updatedFibers = new Set();
+      if (!transition._updatedFibers) {
+        transition._updatedFibers = new Set();
       }
-
-      batchConfigTransition._updatedFibers.add(fiber);
+      transition._updatedFibers.add(fiber);
     }
 
     const actionScopeLane = peekEntangledActionLane();
@@ -642,25 +635,7 @@ export function requestUpdateLane(fiber: Fiber): Lane {
         requestTransitionLane(transition);
   }
 
-  // Updates originating inside certain React methods, like flushSync, have
-  // their priority set by tracking it with a context variable.
-  //
-  // The opaque type returned by the host config is internally a lane, so we can
-  // use that directly.
-  // TODO: Move this type conversion to the event priority module.
-  const updateLane: Lane = (getCurrentUpdatePriority(): any);
-  if (updateLane !== NoLane) {
-    return updateLane;
-  }
-
-  // This update originated outside React. Ask the host environment for an
-  // appropriate priority, based on the type of event.
-  //
-  // The opaque type returned by the host config is internally a lane, so we can
-  // use that directly.
-  // TODO: Move this type conversion to the event priority module.
-  const eventLane: Lane = (getCurrentEventPriority(): any);
-  return eventLane;
+  return eventPriorityToLane(resolveUpdatePriority());
 }
 
 function requestRetryLane(fiber: Fiber) {
@@ -670,7 +645,7 @@ function requestRetryLane(fiber: Fiber) {
 
   // Special cases
   const mode = fiber.mode;
-  if ((mode & ConcurrentMode) === NoMode) {
+  if (!disableLegacyMode && (mode & ConcurrentMode) === NoMode) {
     return (SyncLane: Lane);
   }
 
@@ -787,12 +762,14 @@ export function scheduleUpdateOnFiber(
     warnIfUpdatesNotWrappedWithActDEV(fiber);
 
     if (enableTransitionTracing) {
-      const transition = ReactCurrentBatchConfig.transition;
+      const transition = ReactSharedInternals.T;
       if (transition !== null && transition.name != null) {
         if (transition.startTime === -1) {
           transition.startTime = now();
         }
 
+        // $FlowFixMe[prop-missing]: The BatchConfigTransition and Transition types are incompatible but was previously untyped and thus uncaught
+        // $FlowFixMe[incompatible-call]: "
         addTransitionToLanesMap(root, transition, lane);
       }
     }
@@ -825,9 +802,10 @@ export function scheduleUpdateOnFiber(
     if (
       lane === SyncLane &&
       executionContext === NoContext &&
+      !disableLegacyMode &&
       (fiber.mode & ConcurrentMode) === NoMode
     ) {
-      if (__DEV__ && ReactCurrentActQueue.isBatchingLegacy) {
+      if (__DEV__ && ReactSharedInternals.isBatchingLegacy) {
         // Treat `act` as if it's inside `batchedUpdates`, even in legacy mode.
       } else {
         // Flush the synchronous work now, unless we're already working or inside
@@ -954,19 +932,32 @@ export function performConcurrentWorkOnRoot(
 
         // Check if something threw
         if (exitStatus === RootErrored) {
-          const originallyAttemptedLanes = lanes;
+          const lanesThatJustErrored = lanes;
           const errorRetryLanes = getLanesToRetrySynchronouslyOnError(
             root,
-            originallyAttemptedLanes,
+            lanesThatJustErrored,
           );
           if (errorRetryLanes !== NoLanes) {
             lanes = errorRetryLanes;
             exitStatus = recoverFromConcurrentError(
               root,
-              originallyAttemptedLanes,
+              lanesThatJustErrored,
               errorRetryLanes,
             );
             renderWasConcurrent = false;
+            // Need to check the exit status again.
+            if (exitStatus !== RootErrored) {
+              // The root did not error this time. Restart the exit algorithm
+              // from the beginning.
+              // TODO: Refactor the exit algorithm to be less confusing. Maybe
+              // more branches + recursion instead of a loop. I think the only
+              // thing that causes it to be a loop is the RootDidNotComplete
+              // check. If that's true, then we don't need a loop/recursion
+              // at all.
+              continue;
+            } else {
+              // The root errored yet again. Proceed to commit the tree.
+            }
           }
         }
         if (exitStatus === RootFatalErrored) {
@@ -1368,7 +1359,10 @@ export function performSyncWorkOnRoot(root: FiberRoot, lanes: Lanes): null {
   }
 
   let exitStatus = renderRootSync(root, lanes);
-  if (root.tag !== LegacyRoot && exitStatus === RootErrored) {
+  if (
+    (disableLegacyMode || root.tag !== LegacyRoot) &&
+    exitStatus === RootErrored
+  ) {
     // If something threw an error, try rendering one more time. We'll render
     // synchronously to block concurrent data mutations, and we'll includes
     // all pending updates are included. If it still fails after the second
@@ -1443,16 +1437,15 @@ export function getExecutionContext(): ExecutionContext {
 }
 
 export function deferredUpdates<A>(fn: () => A): A {
+  const prevTransition = ReactSharedInternals.T;
   const previousPriority = getCurrentUpdatePriority();
-  const prevTransition = ReactCurrentBatchConfig.transition;
-
   try {
-    ReactCurrentBatchConfig.transition = null;
     setCurrentUpdatePriority(DefaultEventPriority);
+    ReactSharedInternals.T = null;
     return fn();
   } finally {
     setCurrentUpdatePriority(previousPriority);
-    ReactCurrentBatchConfig.transition = prevTransition;
+    ReactSharedInternals.T = prevTransition;
   }
 }
 
@@ -1473,7 +1466,7 @@ export function batchedUpdates<A, R>(fn: A => R, a: A): R {
       if (
         executionContext === NoContext &&
         // Treat `act` as if it's inside `batchedUpdates`, even in legacy mode.
-        !(__DEV__ && ReactCurrentActQueue.isBatchingLegacy)
+        !(__DEV__ && ReactSharedInternals.isBatchingLegacy)
       ) {
         resetRenderTimer();
         flushSyncWorkOnLegacyRootsOnly();
@@ -1489,15 +1482,15 @@ export function discreteUpdates<A, B, C, D, R>(
   c: C,
   d: D,
 ): R {
+  const prevTransition = ReactSharedInternals.T;
   const previousPriority = getCurrentUpdatePriority();
-  const prevTransition = ReactCurrentBatchConfig.transition;
   try {
-    ReactCurrentBatchConfig.transition = null;
     setCurrentUpdatePriority(DiscreteEventPriority);
+    ReactSharedInternals.T = null;
     return fn(a, b, c, d);
   } finally {
     setCurrentUpdatePriority(previousPriority);
-    ReactCurrentBatchConfig.transition = prevTransition;
+    ReactSharedInternals.T = prevTransition;
     if (executionContext === NoContext) {
       resetRenderTimer();
     }
@@ -1507,15 +1500,16 @@ export function discreteUpdates<A, B, C, D, R>(
 // Overload the definition to the two valid signatures.
 // Warning, this opts-out of checking the function body.
 // eslint-disable-next-line no-unused-vars
-declare function flushSync<R>(fn: () => R): R;
+declare function flushSyncFromReconciler<R>(fn: () => R): R;
 // eslint-disable-next-line no-redeclare
-declare function flushSync(void): void;
+declare function flushSyncFromReconciler(void): void;
 // eslint-disable-next-line no-redeclare
-export function flushSync<R>(fn: (() => R) | void): R | void {
+export function flushSyncFromReconciler<R>(fn: (() => R) | void): R | void {
   // In legacy mode, we flush pending passive effects at the beginning of the
   // next event, not at the end of the previous one.
   if (
     rootWithPendingPassiveEffects !== null &&
+    !disableLegacyMode &&
     rootWithPendingPassiveEffects.tag === LegacyRoot &&
     (executionContext & (RenderContext | CommitContext)) === NoContext
   ) {
@@ -1525,12 +1519,12 @@ export function flushSync<R>(fn: (() => R) | void): R | void {
   const prevExecutionContext = executionContext;
   executionContext |= BatchedContext;
 
-  const prevTransition = ReactCurrentBatchConfig.transition;
+  const prevTransition = ReactSharedInternals.T;
   const previousPriority = getCurrentUpdatePriority();
 
   try {
-    ReactCurrentBatchConfig.transition = null;
     setCurrentUpdatePriority(DiscreteEventPriority);
+    ReactSharedInternals.T = null;
     if (fn) {
       return fn();
     } else {
@@ -1538,7 +1532,7 @@ export function flushSync<R>(fn: (() => R) | void): R | void {
     }
   } finally {
     setCurrentUpdatePriority(previousPriority);
-    ReactCurrentBatchConfig.transition = prevTransition;
+    ReactSharedInternals.T = prevTransition;
 
     executionContext = prevExecutionContext;
     // Flush the immediate callbacks that were scheduled during this batch.
@@ -1548,6 +1542,16 @@ export function flushSync<R>(fn: (() => R) | void): R | void {
       flushSyncWorkOnAllRoots();
     }
   }
+}
+
+// If called outside of a render or commit will flush all sync work on all roots
+// Returns whether the the call was during a render or not
+export function flushSyncWork(): boolean {
+  if ((executionContext & (RenderContext | CommitContext)) === NoContext) {
+    flushSyncWorkOnAllRoots();
+    return false;
+  }
+  return true;
 }
 
 export function isAlreadyRendering(): boolean {
@@ -1680,7 +1684,9 @@ function handleThrow(root: FiberRoot, thrownValue: any): void {
   // when React is executing user code.
   resetHooksAfterThrow();
   resetCurrentDebugFiberInDEV();
-  ReactCurrentOwner.current = null;
+  if (__DEV__ || !disableStringRefs) {
+    setCurrentOwner(null);
+  }
 
   if (thrownValue === SuspenseException) {
     // This is a special type of exception used for Suspense. For historical
@@ -1853,8 +1859,8 @@ export function shouldRemainOnPreviousScreen(): boolean {
 }
 
 function pushDispatcher(container: any) {
-  const prevDispatcher = ReactCurrentDispatcher.current;
-  ReactCurrentDispatcher.current = ContextOnlyDispatcher;
+  const prevDispatcher = ReactSharedInternals.H;
+  ReactSharedInternals.H = ContextOnlyDispatcher;
   if (prevDispatcher === null) {
     // The React isomorphic package does not include a default dispatcher.
     // Instead the first renderer will lazily attach one, in order to give
@@ -1866,22 +1872,22 @@ function pushDispatcher(container: any) {
 }
 
 function popDispatcher(prevDispatcher: any) {
-  ReactCurrentDispatcher.current = prevDispatcher;
+  ReactSharedInternals.H = prevDispatcher;
 }
 
-function pushCacheDispatcher() {
-  if (enableCache) {
-    const prevCacheDispatcher = ReactCurrentCache.current;
-    ReactCurrentCache.current = DefaultCacheDispatcher;
-    return prevCacheDispatcher;
+function pushAsyncDispatcher() {
+  if (enableCache || __DEV__ || !disableStringRefs) {
+    const prevAsyncDispatcher = ReactSharedInternals.A;
+    ReactSharedInternals.A = DefaultAsyncDispatcher;
+    return prevAsyncDispatcher;
   } else {
     return null;
   }
 }
 
-function popCacheDispatcher(prevCacheDispatcher: any) {
-  if (enableCache) {
-    ReactCurrentCache.current = prevCacheDispatcher;
+function popAsyncDispatcher(prevAsyncDispatcher: any) {
+  if (enableCache || __DEV__ || !disableStringRefs) {
+    ReactSharedInternals.A = prevAsyncDispatcher;
   }
 }
 
@@ -1929,10 +1935,13 @@ export function renderDidSuspendDelayIfPossible(): void {
   }
 }
 
-export function renderDidError(error: CapturedValue<mixed>) {
+export function renderDidError() {
   if (workInProgressRootExitStatus !== RootSuspendedWithDelay) {
     workInProgressRootExitStatus = RootErrored;
   }
+}
+
+export function queueConcurrentError(error: CapturedValue<mixed>) {
   if (workInProgressRootConcurrentErrors === null) {
     workInProgressRootConcurrentErrors = [error];
   } else {
@@ -1955,7 +1964,7 @@ function renderRootSync(root: FiberRoot, lanes: Lanes) {
   const prevExecutionContext = executionContext;
   executionContext |= RenderContext;
   const prevDispatcher = pushDispatcher(root.containerInfo);
-  const prevCacheDispatcher = pushCacheDispatcher();
+  const prevAsyncDispatcher = pushAsyncDispatcher();
 
   // If the root or lanes have changed, throw out the existing stack
   // and prepare a fresh one. Otherwise we'll continue where we left off.
@@ -2053,7 +2062,7 @@ function renderRootSync(root: FiberRoot, lanes: Lanes) {
 
   executionContext = prevExecutionContext;
   popDispatcher(prevDispatcher);
-  popCacheDispatcher(prevCacheDispatcher);
+  popAsyncDispatcher(prevAsyncDispatcher);
 
   if (workInProgress !== null) {
     // This is a sync render, so we should have finished the whole tree.
@@ -2096,7 +2105,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes) {
   const prevExecutionContext = executionContext;
   executionContext |= RenderContext;
   const prevDispatcher = pushDispatcher(root.containerInfo);
-  const prevCacheDispatcher = pushCacheDispatcher();
+  const prevAsyncDispatcher = pushAsyncDispatcher();
 
   // If the root or lanes have changed, throw out the existing stack
   // and prepare a fresh one. Otherwise we'll continue where we left off.
@@ -2291,7 +2300,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes) {
         }
       }
 
-      if (__DEV__ && ReactCurrentActQueue.current !== null) {
+      if (__DEV__ && ReactSharedInternals.actQueue !== null) {
         // `act` special case: If we're inside an `act` scope, don't consult
         // `shouldYield`. Always keep working until the render is complete.
         // This is not just an optimization: in a unit test environment, we
@@ -2309,7 +2318,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes) {
   resetContextDependencies();
 
   popDispatcher(prevDispatcher);
-  popCacheDispatcher(prevCacheDispatcher);
+  popAsyncDispatcher(prevAsyncDispatcher);
   executionContext = prevExecutionContext;
 
   if (__DEV__) {
@@ -2377,7 +2386,9 @@ function performUnitOfWork(unitOfWork: Fiber): void {
     workInProgress = next;
   }
 
-  ReactCurrentOwner.current = null;
+  if (__DEV__ || !disableStringRefs) {
+    setCurrentOwner(null);
+  }
 }
 
 function replaySuspendedUnitOfWork(unitOfWork: Fiber): void {
@@ -2395,12 +2406,6 @@ function replaySuspendedUnitOfWork(unitOfWork: Fiber): void {
     startProfilerTimer(unitOfWork);
   }
   switch (unitOfWork.tag) {
-    case IndeterminateComponent: {
-      // Because it suspended with `use`, we can assume it's a
-      // function component.
-      unitOfWork.tag = FunctionComponent;
-      // Fallthrough to the next branch.
-    }
     case SimpleMemoComponent:
     case FunctionComponent: {
       // Resolve `defaultProps`. This logic is copied from `beginWork`.
@@ -2410,9 +2415,10 @@ function replaySuspendedUnitOfWork(unitOfWork: Fiber): void {
       const Component = unitOfWork.type;
       const unresolvedProps = unitOfWork.pendingProps;
       const resolvedProps =
+        disableDefaultPropsExceptForClasses ||
         unitOfWork.elementType === Component
           ? unresolvedProps
-          : resolveDefaultProps(Component, unresolvedProps);
+          : resolveDefaultPropsOnNonClassComponent(Component, unresolvedProps);
       let context: any;
       if (!disableLegacyContext) {
         const unmaskedContext = getUnmaskedContext(unitOfWork, Component, true);
@@ -2436,9 +2442,10 @@ function replaySuspendedUnitOfWork(unitOfWork: Fiber): void {
       const Component = unitOfWork.type.render;
       const unresolvedProps = unitOfWork.pendingProps;
       const resolvedProps =
+        disableDefaultPropsExceptForClasses ||
         unitOfWork.elementType === Component
           ? unresolvedProps
-          : resolveDefaultProps(Component, unresolvedProps);
+          : resolveDefaultPropsOnNonClassComponent(Component, unresolvedProps);
 
       next = replayFunctionComponent(
         current,
@@ -2494,7 +2501,9 @@ function replaySuspendedUnitOfWork(unitOfWork: Fiber): void {
     workInProgress = next;
   }
 
-  ReactCurrentOwner.current = null;
+  if (__DEV__ || !disableStringRefs) {
+    setCurrentOwner(null);
+  }
 }
 
 function throwAndUnwindWorkLoop(
@@ -2712,12 +2721,11 @@ function commitRoot(
 ) {
   // TODO: This no longer makes any sense. We already wrap the mutation and
   // layout phases. Should be able to remove.
+  const prevTransition = ReactSharedInternals.T;
   const previousUpdateLanePriority = getCurrentUpdatePriority();
-  const prevTransition = ReactCurrentBatchConfig.transition;
-
   try {
-    ReactCurrentBatchConfig.transition = null;
     setCurrentUpdatePriority(DiscreteEventPriority);
+    ReactSharedInternals.T = null;
     commitRootImpl(
       root,
       recoverableErrors,
@@ -2727,7 +2735,7 @@ function commitRoot(
       spawnedLane,
     );
   } finally {
-    ReactCurrentBatchConfig.transition = prevTransition;
+    ReactSharedInternals.T = prevTransition;
     setCurrentUpdatePriority(previousUpdateLanePriority);
   }
 
@@ -2877,8 +2885,8 @@ function commitRootImpl(
     NoFlags;
 
   if (subtreeHasEffects || rootHasEffect) {
-    const prevTransition = ReactCurrentBatchConfig.transition;
-    ReactCurrentBatchConfig.transition = null;
+    const prevTransition = ReactSharedInternals.T;
+    ReactSharedInternals.T = null;
     const previousPriority = getCurrentUpdatePriority();
     setCurrentUpdatePriority(DiscreteEventPriority);
 
@@ -2886,7 +2894,9 @@ function commitRootImpl(
     executionContext |= CommitContext;
 
     // Reset this to null before calling lifecycles
-    ReactCurrentOwner.current = null;
+    if (__DEV__ || !disableStringRefs) {
+      setCurrentOwner(null);
+    }
 
     // The commit phase is broken into several sub-phases. We do a separate pass
     // of the effect list for each phase: all mutation effects come before all
@@ -2952,7 +2962,7 @@ function commitRootImpl(
 
     // Reset the priority to the previous non-sync value.
     setCurrentUpdatePriority(previousPriority);
-    ReactCurrentBatchConfig.transition = prevTransition;
+    ReactSharedInternals.T = prevTransition;
   } else {
     // No effects.
     root.current = finishedWork;
@@ -3042,7 +3052,10 @@ function commitRootImpl(
   // TODO: We can optimize this by not scheduling the callback earlier. Since we
   // currently schedule the callback in multiple places, will wait until those
   // are consolidated.
-  if (includesSyncLane(pendingPassiveEffectsLanes) && root.tag !== LegacyRoot) {
+  if (
+    includesSyncLane(pendingPassiveEffectsLanes) &&
+    (disableLegacyMode || root.tag !== LegacyRoot)
+  ) {
     flushPassiveEffects();
   }
 
@@ -3179,16 +3192,16 @@ export function flushPassiveEffects(): boolean {
 
     const renderPriority = lanesToEventPriority(pendingPassiveEffectsLanes);
     const priority = lowerEventPriority(DefaultEventPriority, renderPriority);
-    const prevTransition = ReactCurrentBatchConfig.transition;
+    const prevTransition = ReactSharedInternals.T;
     const previousPriority = getCurrentUpdatePriority();
 
     try {
-      ReactCurrentBatchConfig.transition = null;
       setCurrentUpdatePriority(priority);
+      ReactSharedInternals.T = null;
       return flushPassiveEffectsImpl();
     } finally {
       setCurrentUpdatePriority(previousPriority);
-      ReactCurrentBatchConfig.transition = prevTransition;
+      ReactSharedInternals.T = prevTransition;
 
       // Once passive effects have run for the tree - giving components a
       // chance to retain cache instances they use - release the pooled
@@ -3539,7 +3552,7 @@ function retryTimedOutBoundary(boundaryFiber: Fiber, retryLane: Lane) {
 
 export function retryDehydratedSuspenseBoundary(boundaryFiber: Fiber) {
   const suspenseState: null | SuspenseState = boundaryFiber.memoizedState;
-  let retryLane = NoLane;
+  let retryLane: Lane = NoLane;
   if (suspenseState !== null) {
     retryLane = suspenseState.retryLane;
   }
@@ -3547,7 +3560,7 @@ export function retryDehydratedSuspenseBoundary(boundaryFiber: Fiber) {
 }
 
 export function resolveRetryWakeable(boundaryFiber: Fiber, wakeable: Wakeable) {
-  let retryLane = NoLane; // Default
+  let retryLane: Lane = NoLane; // Default
   let retryCache: WeakSet<Wakeable> | Set<Wakeable> | null;
   switch (boundaryFiber.tag) {
     case SuspenseComponent:
@@ -3723,11 +3736,11 @@ function commitDoubleInvokeEffectsInDEV(
   hasPassiveEffects: boolean,
 ) {
   if (__DEV__) {
-    if (useModernStrictMode && root.tag !== LegacyRoot) {
+    if (useModernStrictMode && (disableLegacyMode || root.tag !== LegacyRoot)) {
       let doubleInvokeEffects = true;
 
       if (
-        root.tag === ConcurrentRoot &&
+        (disableLegacyMode || root.tag === ConcurrentRoot) &&
         !(root.current.mode & (StrictLegacyMode | StrictEffectsMode))
       ) {
         doubleInvokeEffects = false;
@@ -3801,13 +3814,12 @@ export function warnAboutUpdateOnNotYetMountedFiberInDEV(fiber: Fiber) {
       return;
     }
 
-    if (!(fiber.mode & ConcurrentMode)) {
+    if (!disableLegacyMode && !(fiber.mode & ConcurrentMode)) {
       return;
     }
 
     const tag = fiber.tag;
     if (
-      tag !== IndeterminateComponent &&
       tag !== HostRoot &&
       tag !== ClassComponent &&
       tag !== FunctionComponent &&
@@ -3921,7 +3933,7 @@ function scheduleCallback(priorityLevel: any, callback) {
   if (__DEV__) {
     // If we're currently inside an `act` scope, bypass Scheduler and push to
     // the `act` queue instead.
-    const actQueue = ReactCurrentActQueue.current;
+    const actQueue = ReactSharedInternals.actQueue;
     if (actQueue !== null) {
       actQueue.push(callback);
       return fakeActCallbackNode;
@@ -3936,12 +3948,12 @@ function scheduleCallback(priorityLevel: any, callback) {
 
 function shouldForceFlushFallbacksInDEV() {
   // Never force flush in production. This function should get stripped out.
-  return __DEV__ && ReactCurrentActQueue.current !== null;
+  return __DEV__ && ReactSharedInternals.actQueue !== null;
 }
 
 function warnIfUpdatesNotWrappedWithActDEV(fiber: Fiber): void {
   if (__DEV__) {
-    if (fiber.mode & ConcurrentMode) {
+    if (disableLegacyMode || fiber.mode & ConcurrentMode) {
       if (!isConcurrentActEnvironment()) {
         // Not in an act environment. No need to warn.
         return;
@@ -3968,7 +3980,7 @@ function warnIfUpdatesNotWrappedWithActDEV(fiber: Fiber): void {
       }
     }
 
-    if (ReactCurrentActQueue.current === null) {
+    if (ReactSharedInternals.actQueue === null) {
       const previousFiber = ReactCurrentFiberCurrent;
       try {
         setCurrentDebugFiberInDEV(fiber);
@@ -3999,9 +4011,9 @@ function warnIfUpdatesNotWrappedWithActDEV(fiber: Fiber): void {
 function warnIfSuspenseResolutionNotWrappedWithActDEV(root: FiberRoot): void {
   if (__DEV__) {
     if (
-      root.tag !== LegacyRoot &&
+      (disableLegacyMode || root.tag !== LegacyRoot) &&
       isConcurrentActEnvironment() &&
-      ReactCurrentActQueue.current === null
+      ReactSharedInternals.actQueue === null
     ) {
       console.error(
         'A suspended resource finished loading inside a test, but the event ' +

@@ -15,13 +15,8 @@ import typeof * as DynamicFeatureFlags from './ReactFeatureFlags.www-dynamic';
 const dynamicFeatureFlags: DynamicFeatureFlags = require('ReactFeatureFlags');
 
 export const {
-  disableInputAttributeSyncing,
-  disableIEWorkarounds,
-  enableBigIntSupport,
   enableTrustedTypesIntegration,
-  enableLegacyFBSupport,
   enableDebugTracing,
-  enableUseRefAccessWarning,
   enableLazyContextPropagation,
   enableUnifiedSyncLane,
   enableRetryLaneExpiration,
@@ -38,6 +33,8 @@ export const {
   enableRenderableContext,
   enableRefAsProp,
   favorSafetyOverHydrationPerf,
+  disableDefaultPropsExceptForClasses,
+  enableNoCloningMemoCache,
 } = dynamicFeatureFlags;
 
 // On WWW, __EXPERIMENTAL__ is used for a new modern build.
@@ -52,11 +49,14 @@ export const enableUpdaterTracking = __PROFILE__;
 export const enableSuspenseAvoidThisFallback = true;
 export const enableSuspenseAvoidThisFallbackFizz = false;
 
+export const disableIEWorkarounds = true;
 export const enableCPUSuspense = true;
 export const enableUseMemoCacheHook = true;
 export const enableUseEffectEventHook = true;
 export const enableFilterEmptyStringAttributesDOM = true;
 export const enableAsyncActions = true;
+export const disableInputAttributeSyncing = false;
+export const enableLegacyFBSupport = true;
 
 // Logs additional User Timing API marks for use with an experimental profiling tool.
 export const enableSchedulingProfiler: boolean =
@@ -65,12 +65,15 @@ export const enableSchedulingProfiler: boolean =
 export const disableLegacyContext = __EXPERIMENTAL__;
 export const enableGetInspectorDataForInstanceInProduction = false;
 
+export const renameElementSymbol = false;
+
 export const enableCache = true;
 export const enableLegacyCache = true;
-export const enableCacheElement = true;
-export const enableFetchInstrumentation = false;
 
 export const enableBinaryFlight = false;
+export const enableFlightReadableStream = false;
+export const enableAsyncIterableChildren = false;
+
 export const enableTaint = false;
 
 export const enablePostpone = false;
@@ -114,9 +117,10 @@ export const useModernStrictMode = true;
 // because JSX is an extremely hot path.
 export const disableStringRefs = false;
 
-export const disableLegacyMode = false;
+export const disableLegacyMode = __EXPERIMENTAL__;
 
 export const disableDOMTestUtils = false;
+export const enableEarlyReturnForPropDiffing = false;
 
 // Flow magic to verify the exports of this file match the original version.
 ((((null: any): ExportsType): FeatureFlagsType): ExportsType);

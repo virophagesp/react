@@ -98,6 +98,7 @@ import {
 } from './ReactFizzNewContext';
 import {
   prepareToUseHooks,
+  prepareToUseThenableState,
   finishHooks,
   checkDidRenderIdHook,
   resetHooksState,
@@ -106,15 +107,17 @@ import {
   setCurrentResumableState,
   getThenableStateAfterSuspending,
   unwrapThenable,
+  readPreviousThenableFromState,
   getActionStateCount,
   getActionStateMatchingIndex,
 } from './ReactFizzHooks';
-import {DefaultCacheDispatcher} from './ReactFizzCache';
+import {DefaultAsyncDispatcher} from './ReactFizzAsyncDispatcher';
 import {getStackByComponentStackNode} from './ReactFizzComponentStack';
 import {emptyTreeContext, pushTreeContext} from './ReactFizzTreeContext';
 
 import {
   getIteratorFn,
+  ASYNC_ITERATOR,
   REACT_ELEMENT_TYPE,
   REACT_PORTAL_TYPE,
   REACT_LAZY_TYPE,
@@ -137,13 +140,15 @@ import {
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {
   disableLegacyContext,
-  enableBigIntSupport,
   enableScopeAPI,
   enableSuspenseAvoidThisFallbackFizz,
   enableCache,
   enablePostpone,
   enableRenderableContext,
   enableRefAsProp,
+  disableDefaultPropsExceptForClasses,
+  enableAsyncIterableChildren,
+  disableStringRefs,
 } from 'shared/ReactFeatureFlags';
 
 import assign from 'shared/assign';
@@ -151,10 +156,6 @@ import getComponentNameFromType from 'shared/getComponentNameFromType';
 import isArray from 'shared/isArray';
 import {SuspenseException, getSuspendedThenable} from './ReactFizzThenable';
 import type {Postpone} from 'react/src/ReactPostpone';
-
-const ReactCurrentDispatcher = ReactSharedInternals.ReactCurrentDispatcher;
-const ReactCurrentCache = ReactSharedInternals.ReactCurrentCache;
-const ReactDebugCurrentFrame = ReactSharedInternals.ReactDebugCurrentFrame;
 
 // Linked list representing the identity of a component given the component/tag name and key.
 // The name might be minified but we assume that it's going to be the same generated name. Typically
@@ -843,7 +844,7 @@ function encodeErrorForBoundary(
       ? 'Switched to client rendering because the server rendering aborted due to:\n\n'
       : 'Switched to client rendering because the server rendering errored:\n\n';
     boundary.errorMessage = prefix + message;
-    boundary.errorStack = stack;
+    boundary.errorStack = stack !== null ? prefix + stack : null;
     boundary.errorComponentStack = thrownInfo.componentStack;
   }
 }
@@ -1391,6 +1392,48 @@ function finishClassComponent(
   task.keyPath = prevKeyPath;
 }
 
+export function resolveClassComponentProps(
+  Component: any,
+  baseProps: Object,
+): Object {
+  let newProps = baseProps;
+
+  if (enableRefAsProp) {
+    // Remove ref from the props object, if it exists.
+    if ('ref' in baseProps) {
+      newProps = ({}: any);
+      for (const propName in baseProps) {
+        if (propName !== 'ref') {
+          newProps[propName] = baseProps[propName];
+        }
+      }
+    }
+  }
+
+  // Resolve default props.
+  const defaultProps = Component.defaultProps;
+  if (
+    defaultProps &&
+    // If disableDefaultPropsExceptForClasses is true, we always resolve
+    // default props here, rather than in the JSX runtime.
+    disableDefaultPropsExceptForClasses
+  ) {
+    // We may have already copied the props object above to remove ref. If so,
+    // we can modify that. Otherwise, copy the props object with Object.assign.
+    if (newProps === baseProps) {
+      newProps = assign({}, newProps, baseProps);
+    }
+    // Taken from old JSX runtime, where this used to live.
+    for (const propName in defaultProps) {
+      if (newProps[propName] === undefined) {
+        newProps[propName] = defaultProps[propName];
+      }
+    }
+  }
+
+  return newProps;
+}
+
 function renderClassComponent(
   request: Request,
   task: Task,
@@ -1398,19 +1441,30 @@ function renderClassComponent(
   Component: any,
   props: any,
 ): void {
+  const resolvedProps = resolveClassComponentProps(Component, props);
   const previousComponentStack = task.componentStack;
   task.componentStack = createClassComponentStack(task, Component);
   const maskedContext = !disableLegacyContext
     ? getMaskedContext(Component, task.legacyContext)
     : undefined;
-  const instance = constructClassInstance(Component, props, maskedContext);
-  mountClassInstance(instance, Component, props, maskedContext);
-  finishClassComponent(request, task, keyPath, instance, Component, props);
+  const instance = constructClassInstance(
+    Component,
+    resolvedProps,
+    maskedContext,
+  );
+  mountClassInstance(instance, Component, resolvedProps, maskedContext);
+  finishClassComponent(
+    request,
+    task,
+    keyPath,
+    instance,
+    Component,
+    resolvedProps,
+  );
   task.componentStack = previousComponentStack;
 }
 
 const didWarnAboutBadClass: {[string]: boolean} = {};
-const didWarnAboutModulePatternComponent: {[string]: boolean} = {};
 const didWarnAboutContextTypeOnFunctionComponent: {[string]: boolean} = {};
 const didWarnAboutGetDerivedStateOnFunctionComponent: {[string]: boolean} = {};
 let didWarnAboutReassigningProps = false;
@@ -1418,9 +1472,7 @@ const didWarnAboutDefaultPropsOnFunctionComponent: {[string]: boolean} = {};
 let didWarnAboutGenerators = false;
 let didWarnAboutMaps = false;
 
-// This would typically be a function component but we still support module pattern
-// components for some reason.
-function renderIndeterminateComponent(
+function renderFunctionComponent(
   request: Request,
   task: Task,
   keyPath: KeyNode,
@@ -1465,33 +1517,6 @@ function renderIndeterminateComponent(
   const actionStateCount = getActionStateCount();
   const actionStateMatchingIndex = getActionStateMatchingIndex();
 
-  if (__DEV__) {
-    // Support for module components is deprecated and is removed behind a flag.
-    // Whether or not it would crash later, we want to show a good message in DEV first.
-    if (
-      typeof value === 'object' &&
-      value !== null &&
-      typeof value.render === 'function' &&
-      value.$$typeof === undefined
-    ) {
-      const componentName = getComponentNameFromType(Component) || 'Unknown';
-      if (!didWarnAboutModulePatternComponent[componentName]) {
-        console.error(
-          'The <%s /> component appears to be a function component that returns a class instance. ' +
-            'Change %s to a class that extends React.Component instead. ' +
-            "If you can't use a class try assigning the prototype on the function as a workaround. " +
-            "`%s.prototype = React.Component.prototype`. Don't use an arrow function since it " +
-            'cannot be called with `new` by React.',
-          componentName,
-          componentName,
-          componentName,
-        );
-        didWarnAboutModulePatternComponent[componentName] = true;
-      }
-    }
-  }
-
-  // Proceed under the assumption that this is a function component
   if (__DEV__) {
     if (disableLegacyContext && Component.contextTypes) {
       console.error(
@@ -1587,7 +1612,10 @@ function validateFunctionComponentInDev(Component: any): void {
       }
     }
 
-    if (Component.defaultProps !== undefined) {
+    if (
+      !disableDefaultPropsExceptForClasses &&
+      Component.defaultProps !== undefined
+    ) {
       const componentName = getComponentNameFromType(Component) || 'Unknown';
 
       if (!didWarnAboutDefaultPropsOnFunctionComponent[componentName]) {
@@ -1629,7 +1657,15 @@ function validateFunctionComponentInDev(Component: any): void {
   }
 }
 
-function resolveDefaultProps(Component: any, baseProps: Object): Object {
+function resolveDefaultPropsOnNonClassComponent(
+  Component: any,
+  baseProps: Object,
+): Object {
+  if (disableDefaultPropsExceptForClasses) {
+    // Support for defaultProps is removed in React 19 for all types
+    // except classes.
+    return baseProps;
+  }
   if (Component && Component.defaultProps) {
     // Resolve default props. Taken from ReactElement
     const props = assign({}, baseProps);
@@ -1705,7 +1741,10 @@ function renderMemo(
   ref: any,
 ): void {
   const innerType = type.type;
-  const resolvedProps = resolveDefaultProps(innerType, props);
+  const resolvedProps = resolveDefaultPropsOnNonClassComponent(
+    innerType,
+    props,
+  );
   renderElement(request, task, keyPath, innerType, resolvedProps, ref);
 }
 
@@ -1779,7 +1818,10 @@ function renderLazyComponent(
   const payload = lazyComponent._payload;
   const init = lazyComponent._init;
   const Component = init(payload);
-  const resolvedProps = resolveDefaultProps(Component, props);
+  const resolvedProps = resolveDefaultPropsOnNonClassComponent(
+    Component,
+    props,
+  );
   renderElement(request, task, keyPath, Component, resolvedProps, ref);
   task.componentStack = previousComponentStack;
 }
@@ -1817,7 +1859,7 @@ function renderElement(
       renderClassComponent(request, task, keyPath, type, props);
       return;
     } else {
-      renderIndeterminateComponent(request, task, keyPath, type, props);
+      renderFunctionComponent(request, task, keyPath, type, props);
       return;
     }
   }
@@ -2113,36 +2155,87 @@ function replayElement(
   // rendered in the prelude and skip it.
 }
 
-// $FlowFixMe[missing-local-annot]
-function validateIterable(iterable, iteratorFn: Function): void {
+function validateIterable(
+  task: Task,
+  iterable: Iterable<any>,
+  childIndex: number,
+  iterator: Iterator<any>,
+  iteratorFn: () => ?Iterator<any>,
+): void {
   if (__DEV__) {
-    // We don't support rendering Generators because it's a mutation.
-    // See https://github.com/facebook/react/issues/12995
-    if (
-      typeof Symbol === 'function' &&
-      iterable[Symbol.toStringTag] === 'Generator'
-    ) {
-      if (!didWarnAboutGenerators) {
-        console.error(
-          'Using Generators as children is unsupported and will likely yield ' +
-            'unexpected results because enumerating a generator mutates it. ' +
-            'You may convert it to an array with `Array.from()` or the ' +
-            '`[...spread]` operator before rendering. Keep in mind ' +
-            'you might need to polyfill these features for older browsers.',
-        );
+    if (iterator === iterable) {
+      // We don't support rendering Generators as props because it's a mutation.
+      // See https://github.com/facebook/react/issues/12995
+      // We do support generators if they were created by a GeneratorFunction component
+      // as its direct child since we can recreate those by rerendering the component
+      // as needed.
+      const isGeneratorComponent =
+        childIndex === -1 && // Only the root child is valid
+        task.componentStack !== null &&
+        task.componentStack.tag === 1 && // FunctionComponent
+        // $FlowFixMe[method-unbinding]
+        Object.prototype.toString.call(task.componentStack.type) ===
+          '[object GeneratorFunction]' &&
+        // $FlowFixMe[method-unbinding]
+        Object.prototype.toString.call(iterator) === '[object Generator]';
+      if (!isGeneratorComponent) {
+        if (!didWarnAboutGenerators) {
+          console.error(
+            'Using Iterators as children is unsupported and will likely yield ' +
+              'unexpected results because enumerating a generator mutates it. ' +
+              'You may convert it to an array with `Array.from()` or the ' +
+              '`[...spread]` operator before rendering. You can also use an ' +
+              'Iterable that can iterate multiple times over the same items.',
+          );
+        }
+        didWarnAboutGenerators = true;
       }
-      didWarnAboutGenerators = true;
-    }
-
-    // Warn about using Maps as children
-    if ((iterable: any).entries === iteratorFn) {
+    } else if ((iterable: any).entries === iteratorFn) {
+      // Warn about using Maps as children
       if (!didWarnAboutMaps) {
         console.error(
           'Using Maps as children is not supported. ' +
             'Use an array of keyed ReactElements instead.',
         );
+        didWarnAboutMaps = true;
       }
-      didWarnAboutMaps = true;
+    }
+  }
+}
+
+function validateAsyncIterable(
+  task: Task,
+  iterable: AsyncIterable<any>,
+  childIndex: number,
+  iterator: AsyncIterator<any>,
+): void {
+  if (__DEV__) {
+    if (iterator === iterable) {
+      // We don't support rendering Generators as props because it's a mutation.
+      // See https://github.com/facebook/react/issues/12995
+      // We do support generators if they were created by a GeneratorFunction component
+      // as its direct child since we can recreate those by rerendering the component
+      // as needed.
+      const isGeneratorComponent =
+        childIndex === -1 && // Only the root child is valid
+        task.componentStack !== null &&
+        task.componentStack.tag === 1 && // FunctionComponent
+        // $FlowFixMe[method-unbinding]
+        Object.prototype.toString.call(task.componentStack.type) ===
+          '[object AsyncGeneratorFunction]' &&
+        // $FlowFixMe[method-unbinding]
+        Object.prototype.toString.call(iterator) === '[object AsyncGenerator]';
+      if (!isGeneratorComponent) {
+        if (!didWarnAboutGenerators) {
+          console.error(
+            'Using AsyncIterators as children is unsupported and will likely yield ' +
+              'unexpected results because enumerating a generator mutates it. ' +
+              'You can use an AsyncIterable that can iterate multiple times over ' +
+              'the same items.',
+          );
+        }
+        didWarnAboutGenerators = true;
+      }
     }
   }
 }
@@ -2266,18 +2359,17 @@ function renderNodeDestructive(
 
     const iteratorFn = getIteratorFn(node);
     if (iteratorFn) {
-      if (__DEV__) {
-        validateIterable(node, iteratorFn);
-      }
       const iterator = iteratorFn.call(node);
       if (iterator) {
+        if (__DEV__) {
+          validateIterable(task, node, childIndex, iterator, iteratorFn);
+        }
         // We need to know how many total children are in this set, so that we
         // can allocate enough id slots to acommodate them. So we must exhaust
         // the iterator before we start recursively rendering the children.
         // TODO: This is not great but I think it's inherent to the id
         // generation algorithm.
         let step = iterator.next();
-        // If there are not entries, we need to push an empty so we start by checking that.
         if (!step.done) {
           const children = [];
           do {
@@ -2285,8 +2377,72 @@ function renderNodeDestructive(
             step = iterator.next();
           } while (!step.done);
           renderChildrenArray(request, task, children, childIndex);
-          return;
         }
+        return;
+      }
+    }
+
+    if (
+      enableAsyncIterableChildren &&
+      typeof (node: any)[ASYNC_ITERATOR] === 'function'
+    ) {
+      const iterator: AsyncIterator<ReactNodeList> = (node: any)[
+        ASYNC_ITERATOR
+      ]();
+      if (iterator) {
+        if (__DEV__) {
+          validateAsyncIterable(task, (node: any), childIndex, iterator);
+        }
+        // TODO: Update the task.node to be the iterator to avoid asking
+        // for new iterators, but we currently warn for rendering these
+        // so needs some refactoring to deal with the warning.
+
+        // We need to push a component stack because if this suspends, we'll pop a stack.
+        const previousComponentStack = task.componentStack;
+        task.componentStack = createBuiltInComponentStack(
+          task,
+          'AsyncIterable',
+        );
+
+        // Restore the thenable state before resuming.
+        const prevThenableState = task.thenableState;
+        task.thenableState = null;
+        prepareToUseThenableState(prevThenableState);
+
+        // We need to know how many total children are in this set, so that we
+        // can allocate enough id slots to acommodate them. So we must exhaust
+        // the iterator before we start recursively rendering the children.
+        // TODO: This is not great but I think it's inherent to the id
+        // generation algorithm.
+        const children = [];
+
+        let done = false;
+
+        if (iterator === node) {
+          // If it's an iterator we need to continue reading where we left
+          // off. We can do that by reading the first few rows from the previous
+          // thenable state.
+          // $FlowFixMe
+          let step = readPreviousThenableFromState();
+          while (step !== undefined) {
+            if (step.done) {
+              done = true;
+              break;
+            }
+            children.push(step.value);
+            step = readPreviousThenableFromState();
+          }
+        }
+
+        if (!done) {
+          let step = unwrapThenable(iterator.next());
+          while (!step.done) {
+            children.push(step.value);
+            step = unwrapThenable(iterator.next());
+          }
+        }
+        task.componentStack = previousComponentStack;
+        renderChildrenArray(request, task, children, childIndex);
         return;
       }
     }
@@ -2353,10 +2509,7 @@ function renderNodeDestructive(
     return;
   }
 
-  if (
-    typeof node === 'number' ||
-    (enableBigIntSupport && typeof node === 'bigint')
-  ) {
+  if (typeof node === 'number' || typeof node === 'bigint') {
     const segment = task.blockedSegment;
     if (segment === null) {
       // We assume a text node doesn't have a representation in the replay set,
@@ -3507,6 +3660,11 @@ function retryRenderTask(
         const ping = task.ping;
         x.then(ping, ping);
         task.thenableState = getThenableStateAfterSuspending();
+        // We pop one task off the stack because the node that suspended will be tried again,
+        // which will add it back onto the stack.
+        if (task.componentStack !== null) {
+          task.componentStack = task.componentStack.parent;
+        }
         return;
       } else if (
         enablePostpone &&
@@ -3592,6 +3750,11 @@ function retryReplayTask(request: Request, task: ReplayTask): void {
         const ping = task.ping;
         x.then(ping, ping);
         task.thenableState = getThenableStateAfterSuspending();
+        // We pop one task off the stack because the node that suspended will be tried again,
+        // which will add it back onto the stack.
+        if (task.componentStack !== null) {
+          task.componentStack = task.componentStack.parent;
+        }
         return;
       }
     }
@@ -3627,21 +3790,21 @@ export function performWork(request: Request): void {
     return;
   }
   const prevContext = getActiveContext();
-  const prevDispatcher = ReactCurrentDispatcher.current;
-  ReactCurrentDispatcher.current = HooksDispatcher;
-  let prevCacheDispatcher;
-  if (enableCache) {
-    prevCacheDispatcher = ReactCurrentCache.current;
-    ReactCurrentCache.current = DefaultCacheDispatcher;
+  const prevDispatcher = ReactSharedInternals.H;
+  ReactSharedInternals.H = HooksDispatcher;
+  let prevAsyncDispatcher = null;
+  if (enableCache || __DEV__ || !disableStringRefs) {
+    prevAsyncDispatcher = ReactSharedInternals.A;
+    ReactSharedInternals.A = DefaultAsyncDispatcher;
   }
 
   const prevRequest = currentRequest;
   currentRequest = request;
 
-  let prevGetCurrentStackImpl;
+  let prevGetCurrentStackImpl = null;
   if (__DEV__) {
-    prevGetCurrentStackImpl = ReactDebugCurrentFrame.getCurrentStack;
-    ReactDebugCurrentFrame.getCurrentStack = getCurrentStackInDEV;
+    prevGetCurrentStackImpl = ReactSharedInternals.getCurrentStack;
+    ReactSharedInternals.getCurrentStack = getCurrentStackInDEV;
   }
   const prevResumableState = currentResumableState;
   setCurrentResumableState(request.resumableState);
@@ -3662,13 +3825,13 @@ export function performWork(request: Request): void {
     fatalError(request, error);
   } finally {
     setCurrentResumableState(prevResumableState);
-    ReactCurrentDispatcher.current = prevDispatcher;
+    ReactSharedInternals.H = prevDispatcher;
     if (enableCache) {
-      ReactCurrentCache.current = prevCacheDispatcher;
+      ReactSharedInternals.A = prevAsyncDispatcher;
     }
 
     if (__DEV__) {
-      ReactDebugCurrentFrame.getCurrentStack = prevGetCurrentStackImpl;
+      ReactSharedInternals.getCurrentStack = prevGetCurrentStackImpl;
     }
     if (prevDispatcher === HooksDispatcher) {
       // This means that we were in a reentrant work loop. This could happen
@@ -4023,22 +4186,25 @@ function flushCompletedQueues(
     // that item fully and then yield. At that point we remove the already completed
     // items up until the point we completed them.
 
+    if (request.pendingRootTasks > 0) {
+      // When there are pending root tasks we don't want to flush anything
+      return;
+    }
+
     let i;
     const completedRootSegment = request.completedRootSegment;
     if (completedRootSegment !== null) {
       if (completedRootSegment.status === POSTPONED) {
         // We postponed the root, so we write nothing.
         return;
-      } else if (request.pendingRootTasks === 0) {
-        flushPreamble(request, destination, completedRootSegment);
-        flushSegment(request, destination, completedRootSegment, null);
-        request.completedRootSegment = null;
-        writeCompletedRoot(destination, request.renderState);
-      } else {
-        // We haven't flushed the root yet so we don't need to check any other branches further down
-        return;
       }
+
+      flushPreamble(request, destination, completedRootSegment);
+      flushSegment(request, destination, completedRootSegment, null);
+      request.completedRootSegment = null;
+      writeCompletedRoot(destination, request.renderState);
     }
+
     writeHoistables(destination, request.resumableState, request.renderState);
     // We emit client rendering instructions for already emitted boundaries first.
     // This is so that we can signal to the client to start client rendering them as

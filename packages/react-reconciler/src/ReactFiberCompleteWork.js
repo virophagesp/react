@@ -40,12 +40,12 @@ import {
   enableTransitionTracing,
   enableRenderableContext,
   passChildrenWhenCloningPersistedNodes,
+  disableLegacyMode,
 } from 'shared/ReactFeatureFlags';
 
 import {now} from './Scheduler';
 
 import {
-  IndeterminateComponent,
   FunctionComponent,
   ClassComponent,
   HostRoot,
@@ -66,6 +66,7 @@ import {
   SimpleMemoComponent,
   LazyComponent,
   IncompleteClassComponent,
+  IncompleteFunctionComponent,
   ScopeComponent,
   OffscreenComponent,
   LegacyHiddenComponent,
@@ -328,7 +329,6 @@ function appendAllChildrenToContainer(
     // children to find all the terminal nodes.
     let node = workInProgress.child;
     while (node !== null) {
-      // eslint-disable-next-line no-labels
       if (node.tag === HostComponent) {
         let instance = node.stateNode;
         if (needsVisibilityToggle && isHidden) {
@@ -741,7 +741,7 @@ function bubbleProperties(completedWork: Fiber) {
     completedWork.alternate !== null &&
     completedWork.alternate.child === completedWork.child;
 
-  let newChildLanes = NoLanes;
+  let newChildLanes: Lanes = NoLanes;
   let subtreeFlags = NoFlags;
 
   if (!didBailout) {
@@ -949,7 +949,12 @@ function completeWork(
   // for hydration.
   popTreeContext(workInProgress);
   switch (workInProgress.tag) {
-    case IndeterminateComponent:
+    case IncompleteFunctionComponent: {
+      if (disableLegacyMode) {
+        break;
+      }
+      // Fallthrough
+    }
     case LazyComponent:
     case SimpleMemoComponent:
     case FunctionComponent:
@@ -1475,6 +1480,9 @@ function completeWork(
       bubbleProperties(workInProgress);
       return null;
     case IncompleteClassComponent: {
+      if (disableLegacyMode) {
+        break;
+      }
       // Same as class component case. I put it down here so that the tags are
       // sequential to ensure this switch is compiled to a jump table.
       const Component = workInProgress.type;
@@ -1740,7 +1748,11 @@ function completeWork(
         }
       }
 
-      if (!nextIsHidden || (workInProgress.mode & ConcurrentMode) === NoMode) {
+      if (
+        !nextIsHidden ||
+        (!disableLegacyMode &&
+          (workInProgress.mode & ConcurrentMode) === NoMode)
+      ) {
         bubbleProperties(workInProgress);
       } else {
         // Don't bubble properties for hidden children unless we're rendering

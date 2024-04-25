@@ -57,8 +57,8 @@ describe('ReactFlight', () => {
     ReactNoopFlightServer = require('react-noop-renderer/flight-server');
     // This stores the state so we need to preserve it
     const flightModules = require('react-noop-renderer/flight-modules');
-    __unmockReact();
     jest.resetModules();
+    __unmockReact();
     jest.mock('react-noop-renderer/flight-modules', () => flightModules);
     React = require('react');
     startTransition = React.startTransition;
@@ -214,7 +214,7 @@ describe('ReactFlight', () => {
       const rootModel = await ReactNoopFlightClient.read(transport);
       const greeting = rootModel.greeting;
       expect(greeting._debugInfo).toEqual(
-        __DEV__ ? [{name: 'Greeting', env: 'Server'}] : undefined,
+        __DEV__ ? [{name: 'Greeting', env: 'Server', owner: null}] : undefined,
       );
       ReactNoop.render(greeting);
     });
@@ -241,7 +241,7 @@ describe('ReactFlight', () => {
     await act(async () => {
       const promise = ReactNoopFlightClient.read(transport);
       expect(promise._debugInfo).toEqual(
-        __DEV__ ? [{name: 'Greeting', env: 'Server'}] : undefined,
+        __DEV__ ? [{name: 'Greeting', env: 'Server', owner: null}] : undefined,
       );
       ReactNoop.render(await promise);
     });
@@ -267,6 +267,51 @@ describe('ReactFlight', () => {
     }
 
     const model = <Items />;
+
+    const transport = ReactNoopFlightServer.render(model);
+
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(<span>ABC</span>);
+  });
+
+  it('can render an iterator as a single shot iterator', async () => {
+    const iterator = (function* () {
+      yield 'A';
+      yield 'B';
+      yield 'C';
+    })();
+
+    const transport = ReactNoopFlightServer.render(iterator);
+    const result = await ReactNoopFlightClient.read(transport);
+
+    // The iterator should be the same as itself.
+    expect(result[Symbol.iterator]()).toBe(result);
+
+    expect(Array.from(result)).toEqual(['A', 'B', 'C']);
+    // We've already consumed this iterator.
+    expect(Array.from(result)).toEqual([]);
+  });
+
+  it('can render a Generator Server Component as a fragment', async () => {
+    function ItemListClient(props) {
+      return <span>{props.children}</span>;
+    }
+    const ItemList = clientReference(ItemListClient);
+
+    function* Items() {
+      yield 'A';
+      yield 'B';
+      yield 'C';
+    }
+
+    const model = (
+      <ItemList>
+        <Items />
+      </ItemList>
+    );
 
     const transport = ReactNoopFlightServer.render(model);
 
@@ -467,6 +512,40 @@ describe('ReactFlight', () => {
         selected: true
       `);
   });
+
+  if (typeof FormData !== 'undefined') {
+    it('can transport FormData (no blobs)', async () => {
+      function ComponentClient({prop}) {
+        return `
+          formData: ${prop instanceof FormData}
+          hi: ${prop.get('hi')}
+          multiple: ${prop.getAll('multiple')}
+          content: ${JSON.stringify(Array.from(prop))}
+        `;
+      }
+      const Component = clientReference(ComponentClient);
+
+      const formData = new FormData();
+      formData.append('hi', 'world');
+      formData.append('multiple', 1);
+      formData.append('multiple', 2);
+
+      const model = <Component prop={formData} />;
+
+      const transport = ReactNoopFlightServer.render(model);
+
+      await act(async () => {
+        ReactNoop.render(await ReactNoopFlightClient.read(transport));
+      });
+
+      expect(ReactNoop).toMatchRenderedOutput(`
+          formData: true
+          hi: world
+          multiple: 1,2
+          content: [["hi","world"],["multiple","1"],["multiple","2"]]
+        `);
+    });
+  }
 
   it('can transport cyclic objects', async () => {
     function ComponentClient({prop}) {
@@ -2034,6 +2113,119 @@ describe('ReactFlight', () => {
     expect(ReactNoop).toMatchRenderedOutput(<div>Ba</div>);
   });
 
+  it('shares state when moving keyed Server Components that render fragments', async () => {
+    function StatefulClient({name, initial}) {
+      const [state] = React.useState(initial);
+      return <span>{state}</span>;
+    }
+    const Stateful = clientReference(StatefulClient);
+
+    function ServerComponent({item, initial}) {
+      return [
+        <Stateful key="a" initial={'a' + initial} />,
+        <Stateful key="b" initial={'b' + initial} />,
+      ];
+    }
+
+    const transport = ReactNoopFlightServer.render(
+      <div>
+        <ServerComponent key="A" initial={1} />
+        <ServerComponent key="B" initial={2} />
+      </div>,
+    );
+
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(
+      <div>
+        <span>a1</span>
+        <span>b1</span>
+        <span>a2</span>
+        <span>b2</span>
+      </div>,
+    );
+
+    // We swap the Server Components and the state of each child inside each fragment should move.
+    // Really the Fragment itself moves.
+    const transport2 = ReactNoopFlightServer.render(
+      <div>
+        <ServerComponent key="B" initial={4} />
+        <ServerComponent key="A" initial={3} />
+      </div>,
+    );
+
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport2));
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(
+      <div>
+        <span>a2</span>
+        <span>b2</span>
+        <span>a1</span>
+        <span>b1</span>
+      </div>,
+    );
+  });
+
+  // @gate enableFlightReadableStream && enableAsyncIterableChildren
+  it('shares state when moving keyed Server Components that render async iterables', async () => {
+    function StatefulClient({name, initial}) {
+      const [state] = React.useState(initial);
+      return <span>{state}</span>;
+    }
+    const Stateful = clientReference(StatefulClient);
+
+    async function* ServerComponent({item, initial}) {
+      yield <Stateful key="a" initial={'a' + initial} />;
+      yield <Stateful key="b" initial={'b' + initial} />;
+    }
+
+    const transport = ReactNoopFlightServer.render(
+      <div>
+        <ServerComponent key="A" initial={1} />
+        <ServerComponent key="B" initial={2} />
+      </div>,
+    );
+
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(
+      <div>
+        <span>a1</span>
+        <span>b1</span>
+        <span>a2</span>
+        <span>b2</span>
+      </div>,
+    );
+
+    // We swap the Server Components and the state of each child inside each fragment should move.
+    // Really the Fragment itself moves.
+    const transport2 = ReactNoopFlightServer.render(
+      <div>
+        <ServerComponent key="B" initial={4} />
+        <ServerComponent key="A" initial={3} />
+      </div>,
+    );
+
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport2));
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(
+      <div>
+        <span>a2</span>
+        <span>b2</span>
+        <span>a1</span>
+        <span>b1</span>
+      </div>,
+    );
+  });
+
   it('preserves debug info for server-to-server pass through', async () => {
     function ThirdPartyLazyComponent() {
       return <span>!</span>;
@@ -2047,6 +2239,10 @@ describe('ReactFlight', () => {
       return <span>stranger</span>;
     }
 
+    function ThirdPartyFragmentComponent() {
+      return [<span>Who</span>, ' ', <span>dis?</span>];
+    }
+
     function ServerComponent({transport}) {
       // This is a Server Component that receives other Server Components from a third party.
       const children = ReactNoopFlightClient.read(transport);
@@ -2056,7 +2252,7 @@ describe('ReactFlight', () => {
     const promiseComponent = Promise.resolve(<ThirdPartyComponent />);
 
     const thirdPartyTransport = ReactNoopFlightServer.render(
-      [promiseComponent, lazy],
+      [promiseComponent, lazy, <ThirdPartyFragmentComponent />],
       {
         environmentName: 'third-party',
       },
@@ -2072,19 +2268,32 @@ describe('ReactFlight', () => {
     await act(async () => {
       const promise = ReactNoopFlightClient.read(transport);
       expect(promise._debugInfo).toEqual(
-        __DEV__ ? [{name: 'ServerComponent', env: 'Server'}] : undefined,
+        __DEV__
+          ? [{name: 'ServerComponent', env: 'Server', owner: null}]
+          : undefined,
       );
       const result = await promise;
       const thirdPartyChildren = await result.props.children[1];
       // We expect the debug info to be transferred from the inner stream to the outer.
       expect(thirdPartyChildren[0]._debugInfo).toEqual(
         __DEV__
-          ? [{name: 'ThirdPartyComponent', env: 'third-party'}]
+          ? [{name: 'ThirdPartyComponent', env: 'third-party', owner: null}]
           : undefined,
       );
       expect(thirdPartyChildren[1]._debugInfo).toEqual(
         __DEV__
-          ? [{name: 'ThirdPartyLazyComponent', env: 'third-party'}]
+          ? [{name: 'ThirdPartyLazyComponent', env: 'third-party', owner: null}]
+          : undefined,
+      );
+      expect(thirdPartyChildren[2]._debugInfo).toEqual(
+        __DEV__
+          ? [
+              {
+                name: 'ThirdPartyFragmentComponent',
+                env: 'third-party',
+                owner: null,
+              },
+            ]
           : undefined,
       );
       ReactNoop.render(result);
@@ -2094,6 +2303,88 @@ describe('ReactFlight', () => {
       <div>
         Hello, <span>stranger</span>
         <span>!</span>
+        <span>Who</span> <span>dis?</span>
+      </div>,
+    );
+  });
+
+  // @gate enableFlightReadableStream && enableAsyncIterableChildren
+  it('preserves debug info for server-to-server pass through of async iterables', async () => {
+    let resolve;
+    const iteratorPromise = new Promise(r => (resolve = r));
+
+    async function* ThirdPartyAsyncIterableComponent({item, initial}) {
+      yield <span>Who</span>;
+      yield <span>dis?</span>;
+      resolve();
+    }
+
+    function Keyed({children}) {
+      // Keying this should generate a fragment.
+      return children;
+    }
+
+    function ServerComponent({transport}) {
+      // This is a Server Component that receives other Server Components from a third party.
+      const children = ReactServer.use(
+        ReactNoopFlightClient.read(transport),
+      ).root;
+      return (
+        <div>
+          <Keyed key="keyed">{children}</Keyed>
+        </div>
+      );
+    }
+
+    const thirdPartyTransport = ReactNoopFlightServer.render(
+      {root: <ThirdPartyAsyncIterableComponent />},
+      {
+        environmentName: 'third-party',
+      },
+    );
+
+    if (gate(flag => flag.enableFlightReadableStream)) {
+      // Wait for the iterator to finish
+      await iteratorPromise;
+    }
+    await 0; // One more tick for the return value / closing.
+
+    const transport = ReactNoopFlightServer.render(
+      <ServerComponent transport={thirdPartyTransport} />,
+    );
+
+    await act(async () => {
+      const promise = ReactNoopFlightClient.read(transport);
+      expect(promise._debugInfo).toEqual(
+        __DEV__
+          ? [{name: 'ServerComponent', env: 'Server', owner: null}]
+          : undefined,
+      );
+      const result = await promise;
+      const thirdPartyFragment = await result.props.children;
+      expect(thirdPartyFragment._debugInfo).toEqual(
+        __DEV__ ? [{name: 'Keyed', env: 'Server', owner: null}] : undefined,
+      );
+      // We expect the debug info to be transferred from the inner stream to the outer.
+      expect(thirdPartyFragment.props.children._debugInfo).toEqual(
+        __DEV__
+          ? [
+              {
+                name: 'ThirdPartyAsyncIterableComponent',
+                env: 'third-party',
+                owner: null,
+              },
+            ]
+          : undefined,
+      );
+
+      ReactNoop.render(result);
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(
+      <div>
+        <span>Who</span>
+        <span>dis?</span>
       </div>,
     );
   });
@@ -2125,7 +2416,9 @@ describe('ReactFlight', () => {
       jest.mock('react', () => require('react/react.react-server'));
       ReactServer = require('react');
       ReactNoopFlightServer = require('react-noop-renderer/flight-server');
-      transport = ReactNoopFlightServer.render({root: <ServerComponent />});
+      transport = ReactNoopFlightServer.render({
+        root: ReactServer.createElement(ServerComponent),
+      });
     }).toErrorDev('err');
 
     expect(mockConsoleLog).toHaveBeenCalledTimes(1);
@@ -2144,5 +2437,51 @@ describe('ReactFlight', () => {
     expect(typeof loggedFn).toBe('function');
     expect(loggedFn).not.toBe(foo);
     expect(loggedFn.toString()).toBe(foo.toString());
+  });
+
+  it('uses the server component debug info as the element owner in DEV', async () => {
+    function Container({children}) {
+      return children;
+    }
+
+    function Greeting({firstName}) {
+      // We can't use JSX here because it'll use the Client React.
+      return ReactServer.createElement(
+        Container,
+        null,
+        ReactServer.createElement('span', null, 'Hello, ', firstName),
+      );
+    }
+
+    const model = {
+      greeting: ReactServer.createElement(Greeting, {firstName: 'Seb'}),
+    };
+
+    const transport = ReactNoopFlightServer.render(model);
+
+    await act(async () => {
+      const rootModel = await ReactNoopFlightClient.read(transport);
+      const greeting = rootModel.greeting;
+      // We've rendered down to the span.
+      expect(greeting.type).toBe('span');
+      if (__DEV__) {
+        const greetInfo = {name: 'Greeting', env: 'Server', owner: null};
+        expect(greeting._debugInfo).toEqual([
+          greetInfo,
+          {name: 'Container', env: 'Server', owner: greetInfo},
+        ]);
+        // The owner that created the span was the outer server component.
+        // We expect the debug info to be referentially equal to the owner.
+        expect(greeting._owner).toBe(greeting._debugInfo[0]);
+      } else {
+        expect(greeting._debugInfo).toBe(undefined);
+        expect(greeting._owner).toBe(
+          gate(flags => flags.disableStringRefs) ? undefined : null,
+        );
+      }
+      ReactNoop.render(greeting);
+    });
+
+    expect(ReactNoop).toMatchRenderedOutput(<span>Hello, Seb</span>);
   });
 });

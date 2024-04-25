@@ -10,12 +10,10 @@
 'use strict';
 
 let React;
-let ReactDOM;
 let ReactDOMClient;
 let JSXRuntime;
 let JSXDEVRuntime;
 let act;
-let findDOMNode;
 
 // NOTE: Prefer to call the JSXRuntime directly in these tests so we can be
 // certain that we are testing the runtime behavior, as opposed to the Babel
@@ -27,11 +25,8 @@ describe('ReactJSXRuntime', () => {
     React = require('react');
     JSXRuntime = require('react/jsx-runtime');
     JSXDEVRuntime = require('react/jsx-dev-runtime');
-    ReactDOM = require('react-dom');
     ReactDOMClient = require('react-dom/client');
     act = require('internal-test-utils').act;
-    findDOMNode =
-      ReactDOM.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.findDOMNode;
   });
 
   it('allows static methods to be called using the type property', () => {
@@ -133,9 +128,9 @@ describe('ReactJSXRuntime', () => {
 
     const outer = container.firstChild;
     if (__DEV__) {
-      expect(findDOMNode(outer).className).toBe('moo');
+      expect(outer.className).toBe('moo');
     } else {
-      expect(findDOMNode(outer).className).toBe('quack');
+      expect(outer.className).toBe('quack');
     }
   });
 
@@ -249,7 +244,7 @@ describe('ReactJSXRuntime', () => {
     );
   });
 
-  // @gate !enableRefAsProp
+  // @gate !enableRefAsProp || !__DEV__
   it('should warn when `ref` is being accessed', async () => {
     const container = document.createElement('div');
     class Child extends React.Component {
@@ -378,5 +373,38 @@ describe('ReactJSXRuntime', () => {
       JSXRuntime.jsx(Lazy, {});
     }
     expect(didCall).toBe(false);
+  });
+
+  // @gate enableRefAsProp
+  // @gate disableStringRefs
+  it('does not clone props object if key is not spread', async () => {
+    const config = {
+      foo: 'foo',
+      bar: 'bar',
+    };
+
+    const element = __DEV__
+      ? JSXDEVRuntime.jsxDEV('div', config)
+      : JSXRuntime.jsx('div', config);
+    expect(element.props).toBe(config);
+
+    const configWithKey = {
+      foo: 'foo',
+      bar: 'bar',
+      // This only happens when the key is spread onto the element. A statically
+      // defined key is passed as a separate argument to the jsx() runtime.
+      key: 'key',
+    };
+
+    let elementWithSpreadKey;
+    expect(() => {
+      elementWithSpreadKey = __DEV__
+        ? JSXDEVRuntime.jsxDEV('div', configWithKey)
+        : JSXRuntime.jsx('div', configWithKey);
+    }).toErrorDev(
+      'A props object containing a "key" prop is being spread into JSX',
+      {withoutStack: true},
+    );
+    expect(elementWithSpreadKey.props).not.toBe(configWithKey);
   });
 });

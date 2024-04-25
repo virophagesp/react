@@ -13,7 +13,7 @@
 let React;
 let ReactDOMServer;
 let PropTypes;
-let ReactCurrentDispatcher;
+let ReactSharedInternals;
 
 describe('ReactDOMServer', () => {
   beforeEach(() => {
@@ -21,9 +21,8 @@ describe('ReactDOMServer', () => {
     React = require('react');
     PropTypes = require('prop-types');
     ReactDOMServer = require('react-dom/server');
-    ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
   });
 
   describe('renderToString', () => {
@@ -420,7 +419,7 @@ describe('ReactDOMServer', () => {
       const Context = React.createContext(0);
 
       function readContext(context) {
-        return ReactCurrentDispatcher.current.readContext(context);
+        return ReactSharedInternals.H.readContext(context);
       }
 
       function Consumer(props) {
@@ -575,55 +574,6 @@ describe('ReactDOMServer', () => {
         </React.Suspense>,
       );
       expect(response).toEqual('fallback');
-    });
-  });
-
-  describe('renderToStaticNodeStream', () => {
-    it('should generate simple markup', () => {
-      const SuccessfulElement = React.createElement(() => <img />);
-      const response =
-        ReactDOMServer.renderToStaticNodeStream(SuccessfulElement);
-      expect(response.read().toString()).toMatch(new RegExp('<img' + '/>'));
-    });
-
-    it('should handle errors correctly', () => {
-      const FailingElement = React.createElement(() => {
-        throw new Error('An Error');
-      });
-      const response = ReactDOMServer.renderToStaticNodeStream(FailingElement);
-      return new Promise(resolve => {
-        response.once('error', () => {
-          resolve();
-        });
-        expect(response.read()).toBeNull();
-      });
-    });
-
-    it('should omit text and suspense placeholders', async () => {
-      let resolve = null;
-      const promise = new Promise(res => {
-        resolve = () => {
-          resolved = true;
-          res();
-        };
-      });
-      let resolved = false;
-      function Suspender() {
-        if (resolved) {
-          return 'resolved';
-        }
-        throw promise;
-      }
-
-      const response = ReactDOMServer.renderToStaticNodeStream(
-        <div>
-          <React.Suspense fallback={'fallback'}>
-            <Suspender />
-          </React.Suspense>
-        </div>,
-      );
-      await resolve();
-      expect(response.read().toString()).toEqual('<div>resolved</div>');
     });
   });
 

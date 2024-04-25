@@ -19,6 +19,7 @@ let Scheduler;
 let ReactDOMServer;
 let act;
 let assertLog;
+let assertConsoleErrorDev;
 let waitForAll;
 let waitForThrow;
 
@@ -35,6 +36,7 @@ describe('ReactHooks', () => {
 
     const InternalTestUtils = require('internal-test-utils');
     assertLog = InternalTestUtils.assertLog;
+    assertConsoleErrorDev = InternalTestUtils.assertConsoleErrorDev;
     waitForAll = InternalTestUtils.waitForAll;
     waitForThrow = InternalTestUtils.waitForThrow;
   });
@@ -948,14 +950,13 @@ describe('ReactHooks', () => {
 
   it('warns when reading context inside useMemo', async () => {
     const {useMemo, createContext} = React;
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = createContext('light');
     function App() {
       return useMemo(() => {
-        return ReactCurrentDispatcher.current.readContext(ThemeContext);
+        return ReactSharedInternals.H.readContext(ThemeContext);
       }, []);
     }
 
@@ -968,18 +969,17 @@ describe('ReactHooks', () => {
 
   it('warns when reading context inside useMemo after reading outside it', async () => {
     const {useMemo, createContext} = React;
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = createContext('light');
     let firstRead, secondRead;
     function App() {
-      firstRead = ReactCurrentDispatcher.current.readContext(ThemeContext);
+      firstRead = ReactSharedInternals.H.readContext(ThemeContext);
       useMemo(() => {});
-      secondRead = ReactCurrentDispatcher.current.readContext(ThemeContext);
+      secondRead = ReactSharedInternals.H.readContext(ThemeContext);
       return useMemo(() => {
-        return ReactCurrentDispatcher.current.readContext(ThemeContext);
+        return ReactSharedInternals.H.readContext(ThemeContext);
       }, []);
     }
 
@@ -995,14 +995,13 @@ describe('ReactHooks', () => {
   // Throws because there's no runtime cost for being strict here.
   it('throws when reading context inside useEffect', async () => {
     const {useEffect, createContext} = React;
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = createContext('light');
     function App() {
       useEffect(() => {
-        ReactCurrentDispatcher.current.readContext(ThemeContext);
+        ReactSharedInternals.H.readContext(ThemeContext);
       });
       return null;
     }
@@ -1017,14 +1016,13 @@ describe('ReactHooks', () => {
   // Throws because there's no runtime cost for being strict here.
   it('throws when reading context inside useLayoutEffect', async () => {
     const {useLayoutEffect, createContext} = React;
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = createContext('light');
     function App() {
       useLayoutEffect(() => {
-        ReactCurrentDispatcher.current.readContext(ThemeContext);
+        ReactSharedInternals.H.readContext(ThemeContext);
       });
       return null;
     }
@@ -1041,14 +1039,13 @@ describe('ReactHooks', () => {
 
   it('warns when reading context inside useReducer', async () => {
     const {useReducer, createContext} = React;
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = createContext('light');
     function App() {
       const [state, dispatch] = useReducer((s, action) => {
-        ReactCurrentDispatcher.current.readContext(ThemeContext);
+        ReactSharedInternals.H.readContext(ThemeContext);
         return action;
       }, 0);
       if (state === 0) {
@@ -1069,9 +1066,8 @@ describe('ReactHooks', () => {
     const {useState, createContext} = React;
     const ThemeContext = createContext('light');
 
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     let _setState;
     function Fn() {
@@ -1082,9 +1078,7 @@ describe('ReactHooks', () => {
 
     class Cls extends React.Component {
       render() {
-        _setState(() =>
-          ReactCurrentDispatcher.current.readContext(ThemeContext),
-        );
+        _setState(() => ReactSharedInternals.H.readContext(ThemeContext));
 
         return null;
       }
@@ -1162,15 +1156,14 @@ describe('ReactHooks', () => {
   });
 
   it('resets warning internal state when interrupted by an error', async () => {
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = React.createContext('light');
     function App() {
       React.useMemo(() => {
         // Trigger warnings
-        ReactCurrentDispatcher.current.readContext(ThemeContext);
+        ReactSharedInternals.H.readContext(ThemeContext);
         React.useRef();
         // Interrupt exit from a Hook
         throw new Error('No.');
@@ -1251,14 +1244,13 @@ describe('ReactHooks', () => {
 
   it('warns when reading context inside useMemo', async () => {
     const {useMemo, createContext} = React;
-    const ReactCurrentDispatcher =
-      React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
-        .ReactCurrentDispatcher;
+    const ReactSharedInternals =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
     const ThemeContext = createContext('light');
     function App() {
       return useMemo(() => {
-        return ReactCurrentDispatcher.current.readContext(ThemeContext);
+        return ReactSharedInternals.H.readContext(ThemeContext);
       }, []);
     }
 
@@ -1820,7 +1812,6 @@ describe('ReactHooks', () => {
   // Regression test for #14674
   it('does not swallow original error when updating another component in render phase', async () => {
     const {useState} = React;
-    spyOnDev(console, 'error').mockImplementation(() => {});
 
     let _setState;
     function A() {
@@ -1847,14 +1838,10 @@ describe('ReactHooks', () => {
         );
       });
     }).rejects.toThrow('Hello');
-
-    if (__DEV__) {
-      expect(console.error).toHaveBeenCalledTimes(1);
-      expect(console.error.mock.calls[0][0]).toContain(
-        'Warning: Cannot update a component (`%s`) while rendering ' +
-          'a different component (`%s`).',
-      );
-    }
+    assertConsoleErrorDev([
+      'Warning: Cannot update a component (`A`) while rendering ' +
+        'a different component (`B`).',
+    ]);
   });
 
   // Regression test for https://github.com/facebook/react/issues/15057

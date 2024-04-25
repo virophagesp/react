@@ -15,6 +15,7 @@ import type {
   Usable,
   ReactFormState,
   Awaited,
+  ReactComponentInfo,
   ReactDebugInfo,
 } from 'shared/ReactTypes';
 import type {WorkTag} from './ReactWorkTags';
@@ -193,7 +194,7 @@ export type Fiber = {
   // __DEV__ only
 
   _debugInfo?: ReactDebugInfo | null,
-  _debugOwner?: Fiber | null,
+  _debugOwner?: ReactComponentInfo | Fiber | null,
   _debugIsCurrentlyTiming?: boolean,
   _debugNeedsRemount?: boolean,
 
@@ -433,7 +434,8 @@ export type Dispatcher = {
   ) => [Awaited<S>, (P) => void, boolean],
 };
 
-export type CacheDispatcher = {
-  getCacheSignal: () => AbortSignal,
+export type AsyncDispatcher = {
   getCacheForType: <T>(resourceType: () => T) => T,
+  // DEV-only (or !disableStringRefs)
+  getOwner: () => null | Fiber | ReactComponentInfo,
 };

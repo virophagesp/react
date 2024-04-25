@@ -20,9 +20,9 @@ export const enableProfilerNestedUpdatePhase = __PROFILE__;
 export const enableUpdaterTracking = false;
 export const enableCache = true;
 export const enableLegacyCache = false;
-export const enableCacheElement = true;
-export const enableFetchInstrumentation = false;
 export const enableBinaryFlight = true;
+export const enableFlightReadableStream = true;
+export const enableAsyncIterableChildren = false;
 export const enableTaint = true;
 export const enablePostpone = false;
 export const disableCommentsAsDOMContainers = true;
@@ -42,9 +42,9 @@ export const enableSuspenseAvoidThisFallback = false;
 export const enableSuspenseAvoidThisFallbackFizz = false;
 export const enableCPUSuspense = true;
 export const enableUseMemoCacheHook = true;
+export const enableNoCloningMemoCache = false;
 export const enableUseEffectEventHook = false;
 export const favorSafetyOverHydrationPerf = true;
-export const enableUseRefAccessWarning = false;
 export const enableInfiniteRenderLoopDetection = false;
 export const enableRenderableContext = false;
 
@@ -87,7 +87,10 @@ export const enableReactTestRendererWarning = false;
 export const disableLegacyMode = false;
 export const disableDOMTestUtils = false;
 
-export const enableBigIntSupport = false;
+export const disableDefaultPropsExceptForClasses = false;
+export const enableEarlyReturnForPropDiffing = false;
+
+export const renameElementSymbol = false;
 
 // Flow magic to verify the exports of this file match the original version.
 ((((null: any): ExportsType): FeatureFlagsType): ExportsType);

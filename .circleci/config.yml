@@ -2,7 +2,7 @@ version: 2.1
 
 aliases:
   - &docker
-    - image: cimg/openjdk:18.0-node
+    - image: cimg/node:18.20.1-browsers
 
   - &environment
     TZ: /usr/share/zoneinfo/America/Los_Angeles
@@ -84,7 +84,6 @@ jobs:
       - run: node ./scripts/prettier/index
       - run: node ./scripts/tasks/eslint
       - run: ./scripts/circleci/check_license.sh
-      - run: ./scripts/circleci/check_modules.sh
       - run: ./scripts/circleci/test_print_warnings.sh
 
   yarn_flow:
@@ -212,6 +211,8 @@ jobs:
       - setup_node_modules
       - run:
           command: node ./scripts/tasks/danger
+      - store_artifacts:
+          path: sizebot-message.md
 
   build_devtools_and_process_artifacts:
     docker: *docker
@@ -247,8 +248,7 @@ jobs:
           command: ./scripts/circleci/run_devtools_e2e_tests.js
 
   run_fixtures_flight_tests:
-    docker:
-      - image: cimg/openjdk:20.0-node
+    docker: *docker
     environment: *environment
     steps:
       - checkout
@@ -639,7 +639,7 @@ workflows:
           # because this used to be called the "next" channel and some
           # downstream consumers might still expect that tag. We can remove this
           # after some time has elapsed and the change has been communicated.
-          dist_tag: "canary,next"
+          dist_tag: "canary,next,beta"
       - publish_prerelease:
           name: Publish to Experimental channel
           requires:
@@ -668,7 +668,7 @@ workflows:
           name: Publish to Canary channel
           commit_sha: << pipeline.git.revision >>
           release_channel: stable
-          dist_tag: "canary,next"
+          dist_tag: "canary,next,beta"
       - publish_prerelease:
           name: Publish to Experimental channel
           requires:

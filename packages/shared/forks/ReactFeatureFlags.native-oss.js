@@ -22,7 +22,6 @@ export const enableRefAsProp = __TODO_NEXT_RN_MAJOR__;
 export const disableStringRefs = __TODO_NEXT_RN_MAJOR__;
 export const disableLegacyMode = __TODO_NEXT_RN_MAJOR__;
 export const disableDOMTestUtils = __TODO_NEXT_RN_MAJOR__;
-export const enableBigIntSupport = __TODO_NEXT_RN_MAJOR__;
 export const useModernStrictMode = __TODO_NEXT_RN_MAJOR__;
 export const enableReactTestRendererWarning = __TODO_NEXT_RN_MAJOR__;
 export const enableAsyncActions = __TODO_NEXT_RN_MAJOR__;
@@ -38,6 +37,7 @@ export const enableComponentStackLocations = __TODO_NEXT_RN_MAJOR__;
 // -----------------------------------------------------------------------------
 export const enableCache = __TODO_NEXT_RN_MAJOR__;
 export const enableRenderableContext = __TODO_NEXT_RN_MAJOR__;
+export const disableDefaultPropsExceptForClasses = __TODO_NEXT_RN_MAJOR__;
 
 // -----------------------------------------------------------------------------
 // Already enabled for next React Native major.
@@ -48,11 +48,11 @@ export const enableRenderableContext = __TODO_NEXT_RN_MAJOR__;
 const __NEXT_RN_MAJOR__ = true;
 export const disableClientCache = __NEXT_RN_MAJOR__;
 export const disableLegacyContext = __NEXT_RN_MAJOR__;
-export const enableCacheElement = __NEXT_RN_MAJOR__;
 export const enableTaint = __NEXT_RN_MAJOR__;
 export const enableUnifiedSyncLane = __NEXT_RN_MAJOR__;
 export const enableFizzExternalRuntime = __NEXT_RN_MAJOR__; // DOM-only
 export const enableBinaryFlight = __NEXT_RN_MAJOR__; // DOM-only
+export const enableFlightReadableStream = __NEXT_RN_MAJOR__; // DOM-only
 export const enableServerComponentKeys = __NEXT_RN_MAJOR__;
 export const enableServerComponentLogs = __NEXT_RN_MAJOR__;
 
@@ -62,6 +62,7 @@ export const debugRenderPhaseSideEffectsForStrictMode = __DEV__;
 
 // TODO: decide on React 19
 export const enableUseMemoCacheHook = false;
+export const enableNoCloningMemoCache = false;
 export const enableUseDeferredValueInitialArg = __EXPERIMENTAL__;
 
 // -----------------------------------------------------------------------------
@@ -72,7 +73,6 @@ export const enableDebugTracing = false;
 export const enableAsyncDebugInfo = false;
 export const enableSchedulingProfiler = __PROFILE__;
 export const enableLegacyCache = false;
-export const enableFetchInstrumentation = false;
 export const enablePostpone = false;
 export const disableCommentsAsDOMContainers = true;
 export const disableInputAttributeSyncing = false;
@@ -93,7 +93,6 @@ export const enableRetryLaneExpiration = false;
 export const retryLaneExpirationMs = 5000;
 export const syncLaneExpirationMs = 250;
 export const transitionLaneExpirationMs = 5000;
-export const enableUseRefAccessWarning = false;
 export const disableSchedulerTimeoutInWorkLoop = false;
 export const enableLazyContextPropagation = false;
 export const enableLegacyHidden = false;
@@ -102,6 +101,10 @@ export const allowConcurrentByDefault = false;
 export const enableTransitionTracing = false;
 export const enableDO_NOT_USE_disableStrictPassiveEffect = false;
 export const passChildrenWhenCloningPersistedNodes = false;
+export const enableEarlyReturnForPropDiffing = false;
+export const enableAsyncIterableChildren = false;
+
+export const renameElementSymbol = true;
 
 // Profiling Only
 export const enableProfilerTimer = __PROFILE__;

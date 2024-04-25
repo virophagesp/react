@@ -20,7 +20,7 @@ import {
   getPublicRootInstance,
   createContainer,
   updateContainer,
-  flushSync,
+  flushSyncFromReconciler,
   injectIntoDevTools,
   batchedUpdates,
   defaultOnUncaughtError,
@@ -468,14 +468,14 @@ function create(
   update(newElement: React$Element<any>): any,
   unmount(): void,
   getInstance(): React$Component<any, any> | PublicInstance | null,
-  unstable_flushSync: typeof flushSync,
+  unstable_flushSync: typeof flushSyncFromReconciler,
 } {
   if (__DEV__) {
     if (
       enableReactTestRendererWarning === true &&
       global.IS_REACT_NATIVE_TEST_ENVIRONMENT !== true
     ) {
-      console.warn(
+      console.error(
         'react-test-renderer is deprecated. See https://react.dev/warnings/react-test-renderer',
       );
     }
@@ -597,7 +597,7 @@ function create(
       return getPublicRootInstance(root);
     },
 
-    unstable_flushSync: flushSync,
+    unstable_flushSync: flushSyncFromReconciler,
   };
 
   Object.defineProperty(
